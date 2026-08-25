@@ -2,6 +2,37 @@
 
 Build an AI shopping agent that asks useful follow-up questions and recommends the customer's hidden target product within at most 10 turns.
 
+## Development
+Before you begin, create a new folder to hold your project.
+
+### Commands to set up connection between Local and Remote Git Repository
+```sh
+cd insert/your/path/to/the/folder/here
+git init
+git remote add origin https://github.com/iiank/The-Outliers-TikTok-TechJam-2026.git
+git pull origin main
+```
+
+### Register Github account
+```sh
+git config --global user.email "you@example.com"
+git config --global user.name "github username"
+```
+
+## Before pushing commits (IMPORTANT!)
+### Ensure Local Git Repository is in sync with Remote Git Repository
+```sh
+git branch -m main          # To ensure you're in main branch
+git pull origin main        # Pull any recent commits from other developers
+```
+
+### Pushing commits
+```sh
+git add .                                              # To stage recent edits
+git commit -m "brief description of commit"            # To commit edits with description
+git push origin main                                   # Push to remote git repo
+```
+
 ## What You Receive
 
 - A frozen catalog of 50,000 products from the `Clothing_Shoes_and_Jewelry` category of Amazon Reviews 2023.
@@ -83,7 +114,7 @@ Only exact `parent_asin` equality produces a hit. Core metrics are also reported
 
 ## Model Choice and Cost
 
-Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer does not provide or reimburse model API credits; teams are responsible for any costs incurred through optional external services.
+Teams may use any legally accessible LLM API or local model. Teams manage their own credentials and must never commit API keys. Model choice, estimated cost, token usage, and latency must be disclosed. Token usage is a feasibility metric, not part of the core technical score. The organizer may reimburse model costs through prizes instead of issuing API keys.
 
 ## Files
 
