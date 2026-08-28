@@ -49,7 +49,7 @@ def build_reranker_query(state: Dict[str, Any]) -> str:
 
 def load_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str, Any]]:
     """
-    Loads the complete catalog into memory once during application startup.
+    Loads the complete reranker_catalog into memory once during agent startup.
     """
     catalog = []
     with open(catalog_path, "r", encoding="utf-8") as f:
@@ -91,7 +91,7 @@ class ProductReranker:
     ) -> List[Dict[str, Any]]:
         """
         Ranks candidate documents against a query string.
-        Expects candidates to contain a pre-formatted 'document' string.
+        Candidates is an array of preformatted documents.
         """
         if not candidates:
             return []
@@ -118,7 +118,7 @@ class ProductReranker:
         top_k: int = 10,
     ) -> List[Dict[str, Any]]:
         """
-        Convenience method for agent.py: parses state, builds pairs from in-memory catalog, and ranks.
+        function for agent: parses state, builds pairs from in-memory catalog, and ranks.
         """
         query = build_reranker_query(state)
         
