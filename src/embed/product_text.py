@@ -1,12 +1,3 @@
-"""Catalog row -> the string that gets embedded.
-
-This module is the single highest-leverage knob in retrieval. The evaluator
-builds its query from the target product's own `categories` and `features`
-(see local_evaluator.intent_card / initial_message), so the category path and
-raw feature bullets carry most of the matching signal. Variants are kept
-side by side so they can be compared against turn-1 recall.
-"""
-
 from __future__ import annotations
 
 VARIANTS = ("title_cat", "default", "rich")
@@ -28,14 +19,6 @@ def _join(values: object, limit: int | None = None) -> str:
 
 
 def product_to_text(row: dict, variant: str = "default") -> str:
-    """Build the embedding string for one catalog row.
-
-    variant:
-        title_cat - title + category path only. Strong, cheap baseline.
-        default   - adds feature bullets and a truncated description.
-        rich      - adds details dict and store. Most overlap with the
-                    evaluator's generated query, but most dilution risk.
-    """
     title = str(row.get("title") or "")
     categories = " > ".join(str(c) for c in (row.get("categories") or []))
 
