@@ -18,6 +18,7 @@ tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
 artifacts/
+.venv/
 
 # reranker
 ~/.cache/huggingface/
