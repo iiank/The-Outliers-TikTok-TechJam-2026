@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 from sentence_transformers import CrossEncoder
