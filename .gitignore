@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .env
+.venv/
 results.json
 data/catalog.jsonl
 data/releases/
@@ -18,3 +19,9 @@ tests/test_organizer_pipeline.py
 *.log
 artifacts/
 .venv/
+
+# reranker
+~/.cache/huggingface/
+*.safetensors
+*.bin
+*.pt
