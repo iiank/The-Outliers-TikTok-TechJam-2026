@@ -1,11 +1,3 @@
-"""Thin wrapper over sentence-transformers.
-
-Two separate encode methods rather than one with a flag: BGE and E5 expect an
-instruction on the query side and none on the document side, and getting that
-backwards costs recall silently. Making it impossible to pass the wrong side
-is worth the extra method.
-"""
-
 from __future__ import annotations
 
 import numpy as np
@@ -24,11 +16,6 @@ DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 class Embedder:
-    """MiniLM is symmetric and takes no prefix, so it appears in neither table
-    above and falls through to the empty-string default. Adding a prefixed
-    model later means adding an entry, not changing any call site.
-    """
-
     def __init__(self, model_name: str = DEFAULT_MODEL, device: str | None = None) -> None:
         self.model_name = model_name
         self.model = SentenceTransformer(model_name, device=device)
