@@ -1,4 +1,3 @@
-import json
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
@@ -6,87 +5,47 @@ from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger(__name__)
 
-class ProductReranker:
-    def __init__(
-        self,
-        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
-        device: Optional[str] = None,
-        max_length: int = 192,
-        batch_size: int = 64,
-        use_fp16: bool = True,
-    ):
-        """
-        Persistent reranker wrapper optimized for low-latency batch scoring.
-        """
-        if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
+RERANKER_CATALOG_LEN = 50000
 
-        self.max_length = max_length
-        self.batch_size = batch_size
+def build_reranker_query(state: Dict[str, Any]) -> str:
+    """
+    Parses DialogueState into a compact, high-density query string for MS MARCO.
+    """
+    session_profile = state.get("session_profile", {})
+    user_profile = state.get("user_profile", {})
 
-        logger.info(f"Loading CrossEncoder ({model_name}) onto {self.device}...")
-        self.model = CrossEncoder(
-            model_name,
-            max_length=self.max_length,
-            device=self.device
-        )
+    query_parts = []
 
-        # Enable half precision if running on CUDA for ~2x compute speedup
-        if self.device == "cuda" and use_fp16:
-            self.model.model.half()
+    # category
+    categories = session_profile.get("category", [])
+    if categories:
+        query_parts.append(" ".join(categories))
 
-    @torch.inference_mode()
-    def rank(
-        self,
-        query: str,
-        candidates: List[Dict[str, Any]],
-        top_k: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """
-        Ranks candidate documents against a query string using batch inference.
-        """
-        if not candidates:
-            return []
+    # descriptors in session_profile
+    descriptors = []
+    for slot in ["color", "material", "style", "brand"]:
+        values = session_profile.get(slot, [])
+        if values:
+            descriptors.extend(values)
+    if descriptors:
+        query_parts.append(" ".join(descriptors))
 
-        # Prepare (query, document) pairs
-        pairs = [(query, doc.get("document", "")) for doc in candidates]
+    # features & use case in session_profile
+    specs = []
+    for slot in ["feature", "use_case", "other"]:
+        values = session_profile.get(slot, [])
+        if values:
+            specs.extend(values)
+    if specs:
+        query_parts.append("with " + ", ".join(specs))
 
-        # Fast batched prediction
-        scores = self.model.predict(
-            pairs,
-            batch_size=self.batch_size,
-            show_progress_bar=False,
-            convert_to_numpy=True
-        )
+    # user preferences (Personalization)
+    pref_tags = user_profile.get("preference_tags", [])
+    if pref_tags:
+        query_parts.append(f"preferences: {', '.join(pref_tags)}")
 
-        for doc, score in zip(candidates, scores):
-            doc["score"] = float(score)
-
-        return sorted(candidates, key=lambda x: x["score"], reverse=True)[:top_k]
-
-    def rank_indices(
-        self,
-        query: str,
-        target_indices: Sequence[int],
-        catalog: List[Dict[str, Any]],
-        top_k: int = 10,
-    ) -> List[Tuple[int, str]]:
-        """
-        Directly fetches candidate records from an in-memory catalog and returns (index, parent_asin).
-        """
-        # Fast memory indexing
-        candidates = []
-        for idx in target_indices:
-            if 0 <= idx < len(catalog):
-                item = catalog[idx].copy()
-                item["index"] = idx
-                candidates.append(item)
-
-        ranked = self.rank(query=query, candidates=candidates, top_k=top_k)
-        return [(doc["index"], doc.get("parent_asin", "")) for doc in ranked]
-
+    query_str = " ".join(query_parts).strip()
+    return query_str if query_str else "general merchandise"
 
 def load_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str, Any]]:
     """
@@ -99,3 +58,76 @@ def load_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str,
             if line_str:
                 catalog.append(json.loads(line_str))
     return catalog
+
+class ProductReranker:
+    def __init__(
+        self,
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        device: Optional[str] = None,
+        max_length: int = 192,
+        batch_size: int = 64,
+        use_fp16: bool = True,
+    ):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.max_length = max_length
+        self.batch_size = batch_size
+
+        logger.info(f"Loading CrossEncoder ({model_name}) onto {self.device}...")
+        self.model = CrossEncoder(
+            model_name,
+            max_length=self.max_length,
+            device=self.device,
+        )
+
+        if self.device == "cuda" and use_fp16:
+            self.model.model.half()
+
+    @torch.inference_mode()
+    def rank(
+        self,
+        query: str,
+        candidates: List[Dict[str, Any]],
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Ranks candidate documents against a query string.
+        Expects candidates to contain a pre-formatted 'document' string.
+        """
+        if not candidates:
+            return []
+
+        pairs = [(query, doc.get("document", "")) for doc in candidates]
+
+        scores = self.model.predict(
+            pairs,
+            batch_size=self.batch_size,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+
+        for doc, score in zip(candidates, scores):
+            doc["score"] = float(score)
+
+        return sorted(candidates, key=lambda x: x["score"], reverse=True)[:top_k]
+
+    def rank_from_state(
+        self,
+        state: Dict[str, Any],
+        candidate_indices: Sequence[int],
+        catalog: List[Dict[str, Any]],
+        top_k: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """
+        Convenience method for agent.py: parses state, builds pairs from in-memory catalog, and ranks.
+        """
+        query = build_reranker_query(state)
+        
+        candidates = []
+        for idx in candidate_indices:
+            if 0 <= idx < RERANKER_CATALOG_LEN:
+                item = catalog[idx].copy()
+                item["index"] = idx
+                candidates.append(item)
+
+        return self.rank(query=query, candidates=candidates, top_k=top_k)
+
