@@ -1,0 +1,11 @@
+{
+    "parent_asin": product.get("parent_asin"),
+    "document": template.format(
+        title=title,
+        store=store,
+        leaf_categories=leaf_categories,
+        top_features=top_features
+    ),
+    "price": price,
+    "average_rating": avg_rating
+}
