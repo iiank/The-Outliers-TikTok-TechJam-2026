@@ -34,6 +34,22 @@ class CatalogIndexTests(unittest.TestCase):
     def test_len(self) -> None:
         self.assertEqual(len(CatalogIndex(["A", "B", "C"])), 3)
 
+    def test_index_order_is_stable_across_reloads(self) -> None:
+        # Task 2's load-bearing assumption: index i must resolve to the
+        # same product every time the catalog is loaded, since fusion,
+        # the reranker, and whatever converts index -> parent_asin
+        # downstream all have to agree on one catalog order.
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = Path(directory) / "catalog.jsonl"
+            with catalog_path.open("w", encoding="utf-8") as handle:
+                for asin in ["X", "Y", "Z"]:
+                    handle.write(json.dumps({"parent_asin": asin}) + "\n")
+            first = CatalogIndex.load(catalog_path)
+            second = CatalogIndex.load(catalog_path)
+            self.assertEqual(first.ids, second.ids)
+            for asin in ["X", "Y", "Z"]:
+                self.assertEqual(first.index_of(asin), second.index_of(asin))
+
 
 if __name__ == "__main__":
     unittest.main()
