@@ -5,15 +5,15 @@ import unittest
 from typing import Any, Dict, List
 import torch
 
-from submission.src.reranker.reranker import ProductReranker, build_reranker_query, load_catalog
+from submission.src.reranker.reranker import Reranker, build_reranker_query
 
 
-class TestProductReranker(unittest.TestCase):
+class TestReranker(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Initialize the reranker once across tests to avoid redundant model loading."""
         cls.device = "cuda" if torch.cuda.is_available() else "cpu"
-        cls.reranker = ProductReranker(
+        cls.reranker = Reranker(
             model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
             device=cls.device,
             max_length=192,

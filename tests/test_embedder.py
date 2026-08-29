@@ -39,7 +39,10 @@ def profile_suffix(sample: dict, field: str) -> str:
 def turn_one_queries(
     samples: list[dict], categories: dict, products: dict, profile_field: str = "none"
 ) -> list[dict]:
+<<<<<<< HEAD
     """Return one record per scorable sample: query, target and scenario type."""
+=======
+>>>>>>> dc60b38acb2782dd7eeaf7a4b87d830b273f794b
     records: list[dict] = []
     for sample in samples:
         target = str(sample["ground_truth"]["parent_asin"])
@@ -64,8 +67,13 @@ def recall_at(results: list[list[tuple[str, float]]], targets: list[str], k: int
 def summarise(results: list[list[tuple[str, float]]], targets: list[str]) -> dict:
     return {
         "recall_at_10": recall_at(results, targets, 10),
+<<<<<<< HEAD
         "recall_at_100": recall_at(results, targets, 100),
         "recall_at_500": recall_at(results, targets, 500),
+=======
+        "recall_at_50": recall_at(results, targets, 50),
+        "recall_at_100": recall_at(results, targets, 100),
+>>>>>>> dc60b38acb2782dd7eeaf7a4b87d830b273f794b
     }
 
 
@@ -99,7 +107,11 @@ def main() -> None:
     records = turn_one_queries(samples, categories, products, profile_field=args.profile)
     queries = [r["query"] for r in records]
     targets = [r["target"] for r in records]
+<<<<<<< HEAD
     results = store.search_batch(queries, k=500)
+=======
+    results = store.search_batch(queries, k=100)
+>>>>>>> dc60b38acb2782dd7eeaf7a4b87d830b273f794b
 
     report = {
         "model": embedder.model_name,
