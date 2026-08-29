@@ -49,7 +49,7 @@ def build_reranker_query(state: Dict[str, Any]) -> str:
     query_str = " ".join(query_parts).strip()
     return query_str if query_str else "general merchandise"
 
-def load_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str, Any]]:
+def load_reranker_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str, Any]]:
     """
     Loads the complete reranker_catalog into memory once during agent startup.
     """
@@ -61,7 +61,7 @@ def load_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str,
                 catalog.append(json.loads(line_str))
     return catalog
 
-class ProductReranker:
+class Reranker:
     def __init__(
         self,
         model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
