@@ -16,7 +16,7 @@ import json
 import unittest
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from state import llm_client
 from state.context_distiller import distill
@@ -27,7 +27,6 @@ from state.dialogue_state import (
     budget_bounds,
     no_preference_attributes,
 )
-from state.intent_classifier import classify_intent
 from state.llm_extractor import extract_slots
 
 
@@ -56,11 +55,13 @@ def fake_response(content: str, usage: Dict[str, int]):
 class TrackerTests(unittest.TestCase):
     """update() must derive every change from the extractor, and nothing else."""
 
-    def test_slots_fill_and_log_reasons(self) -> None:
+    def test_slots_fill_and_history_records_it(self) -> None:
         tracker = DialogueStateTracker(extractor=scripted({1: {"category": ["boots"]}}))
         state = tracker.update("anything", tracker.reset("s", {}), turn=1)
         self.assertEqual(state.session_profile["category"], ["boots"])
-        self.assertIn("slot_filled:category", tracker.get_transition_log("s")[0]["trigger_reason"])
+        summary = tracker.get_history_summary("s")
+        self.assertEqual(summary["value_first_seen"]["category"]["boots"], 1)
+        self.assertEqual(summary["last_turn_attributes"], ["category"])
 
     def test_empty_extraction_is_a_no_op(self) -> None:
         # The failure mode: a message with nothing in it, and a failed API call,
@@ -70,7 +71,9 @@ class TrackerTests(unittest.TestCase):
         state = tracker.update("those aren't quite right", before, turn=1)
         self.assertEqual(state.session_profile, before.session_profile)
         self.assertFalse(state.conflicts_with_previous)
-        self.assertEqual(tracker.get_transition_log("s")[0]["trigger_reason"], "no_slots_extracted")
+        summary = tracker.get_history_summary("s")
+        self.assertEqual(summary["last_turn_attributes"], [])
+        self.assertEqual(summary["turns_observed"], 1)
 
     def test_named_retraction_moves_value_to_rejected(self) -> None:
         tracker = DialogueStateTracker(extractor=scripted({
@@ -151,6 +154,20 @@ class TrackerTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             DialogueStateTracker().get_state("never-reset")
 
+    def test_intent_resets_to_none_when_extraction_fails(self) -> None:
+        tracker = DialogueStateTracker(extractor=scripted({1: {"category": ["boots"], "intent": "Buying"}}))
+        state = tracker.update("m", tracker.reset("s", {}), turn=1)
+        self.assertEqual(state.intent, "Buying")
+        tracker_no_signal = DialogueStateTracker(extractor=scripted({}))
+        failed = tracker_no_signal.update("m", tracker_no_signal.reset("s", {}), turn=1)
+        self.assertIsNone(failed.intent)
+
+    def test_intent_is_not_a_slot(self) -> None:
+        tracker = DialogueStateTracker(extractor=scripted({1: {"intent": "Browsing"}}))
+        state = tracker.update("m", tracker.reset("s", {}), turn=1)
+        self.assertEqual(state.intent, "Browsing")
+        self.assertNotIn("intent", state.session_profile)
+
     def test_no_text_matching_against_the_message(self) -> None:
         # The same canned extraction must produce the same state no matter what
         # the customer actually said. That is the Task 0 guarantee.
@@ -225,7 +242,7 @@ class BudgetBoundsTests(unittest.TestCase):
 
 
 class DistillerTests(unittest.TestCase):
-    """Derived context, from the transition log only."""
+    """Derived context, from the incremental history summary only."""
 
     def setUp(self) -> None:
         self.tracker = DialogueStateTracker(extractor=scripted({
@@ -238,18 +255,29 @@ class DistillerTests(unittest.TestCase):
         self.state = self.tracker.reset("s", {"preference_tags": ["fit", "road running"]})
         for turn in range(1, 6):
             self.state = self.tracker.update("m", self.state, turn=turn)
-        self.context = distill(self.tracker.get_transition_log("s"), self.state)
+        self.context = distill(self.tracker.get_history_summary("s"), self.state)
 
     def test_output_is_json_serializable(self) -> None:
         json.dumps(self.context)
 
-    def test_constraints_are_sorted_by_confidence(self) -> None:
-        scores = [c["confidence"] for c in self.context["short_term"]["constraints"]]
-        self.assertEqual(scores, sorted(scores, reverse=True))
+    def test_constraints_are_sorted_alphabetically(self) -> None:
+        attributes = [c["attribute"] for c in self.context["short_term"]["constraints"]]
+        self.assertEqual(attributes, sorted(attributes))
 
-    def test_revised_attribute_ranks_below_a_long_held_one(self) -> None:
+    def test_constraints_carry_no_score(self) -> None:
+        # This session's whole point: raw facts only, no synthesized field.
+        for constraint in self.context["short_term"]["constraints"]:
+            self.assertNotIn("confidence", constraint)
+
+    def test_revised_attribute_shows_its_revision(self) -> None:
+        # category was replaced on turn 4 (running shoes -> hiking boots);
+        # use_case was stated once on turn 1 and never touched again. The raw
+        # facts show this directly, with no derived score standing in for it.
         by_attr = {c["attribute"]: c for c in self.context["short_term"]["constraints"]}
-        self.assertLess(by_attr["category"]["confidence"], by_attr["use_case"]["confidence"])
+        self.assertEqual(by_attr["category"]["revisions"], 1)
+        self.assertEqual(by_attr["use_case"]["revisions"], 0)
+        self.assertIn("category", self.context["short_term"]["unstable_attributes"])
+        self.assertNotIn("use_case", self.context["short_term"]["unstable_attributes"])
 
     def test_freshly_extended_slot_counts_as_current(self) -> None:
         colour = next(c for c in self.context["short_term"]["constraints"] if c["attribute"] == "color")
@@ -264,14 +292,17 @@ class DistillerTests(unittest.TestCase):
         self.assertNotIn("no_preference:brand", [a["value"] for a in avoid])
 
     def test_override_turn_is_recorded(self) -> None:
-        self.assertIn(4, self.context["long_term"]["override_turns"])
+        self.assertIn(4, self.context["session_summary"]["override_turns"])
 
     def test_profile_tags_split_by_session_evidence(self) -> None:
-        corroboration = self.context["long_term"]["profile_corroboration"]
+        corroboration = self.context["session_summary"]["profile_corroboration"]
         self.assertIn("road running", corroboration["confirmed"])
         self.assertIn("fit", corroboration["unobserved"])
 
-    def test_refinement_is_not_counted_as_abandonment(self) -> None:
+    def test_refinement_does_not_land_in_rejected(self) -> None:
+        # "leather" giving way to "full-grain leather" is a refinement, not a
+        # retraction: the shorter phrase is superseded, not withdrawn, so it
+        # must not show up as a negative term anywhere in the distilled output.
         tracker = DialogueStateTracker(extractor=scripted({
             1: {"material": ["leather"]},
             2: {"material": ["full-grain leather"]},
@@ -279,15 +310,16 @@ class DistillerTests(unittest.TestCase):
         state = tracker.reset("r", {})
         for turn in (1, 2):
             state = tracker.update("m", state, turn=turn)
-        context = distill(tracker.get_transition_log("r"), state)
-        self.assertEqual(context["long_term"]["refinement_count"], 1)
-        self.assertEqual(context["long_term"]["abandoned_preferences"], [])
+        context = distill(tracker.get_history_summary("r"), state)
+        self.assertEqual(state.session_profile["material"], ["full-grain leather"])
+        self.assertEqual(context["short_term"]["avoid"], [])
+        self.assertNotIn("leather", context["session_summary"]["carry_forward"]["avoid"])
 
     def test_empty_log_is_shaped_not_broken(self) -> None:
         context = distill([], DialogueState(session_id="e", turn=0))
         json.dumps(context)
         self.assertEqual(context["short_term"]["constraints"], [])
-        self.assertEqual(context["long_term"]["volatility"], 0.0)
+        self.assertEqual(context["session_summary"]["override_turns"], [])
 
 
 class LLMTransportTests(unittest.TestCase):
@@ -337,7 +369,7 @@ class LLMTransportTests(unittest.TestCase):
         self.assertFalse(schema["schema"]["additionalProperties"])
         self.assertEqual(
             set(schema["schema"]["properties"]),
-            set(ASK_ATTRIBUTES) | {"rejected", "no_preference"},
+            set(ASK_ATTRIBUTES) | {"rejected", "no_preference", "intent"},
         )
         self.assertEqual(body["temperature"], 0.0)
 
@@ -380,14 +412,12 @@ class LLMTransportTests(unittest.TestCase):
             raise urllib.error.HTTPError(request.full_url, 400, "Bad", {}, io.BytesIO(b"{}"))
         urllib.request.urlopen = handler
         self.assertEqual(extract_slots("boots", DialogueState()), {})
-        self.assertEqual(classify_intent("boots", DialogueState())["error"], "http_400")
 
     def test_timeout_returns_empty_and_does_not_raise(self) -> None:
         def handler(request, timeout=None):
             raise urllib.error.URLError(TimeoutError("timed out"))
         urllib.request.urlopen = handler
         self.assertEqual(extract_slots("boots", DialogueState()), {})
-        self.assertEqual(classify_intent("boots", DialogueState())["error"], "timeout")
 
     def test_previous_ask_attribute_is_sent_as_context(self) -> None:
         self._serve(json.dumps({k: [] for k in list(ASK_ATTRIBUTES) + ["rejected", "no_preference"]}),
@@ -405,36 +435,28 @@ class LLMTransportTests(unittest.TestCase):
         sent = json.loads(self.captured["body"]["messages"][1]["content"])
         self.assertNotIn("user_profile", sent)
 
-    def test_classifier_reads_attribute_names_not_values(self) -> None:
-        self._serve(json.dumps({"signal": "names a product", "intent": "Buying", "confidence": 0.9}),
-                    {"prompt_tokens": 20, "completion_tokens": 4})
+    def test_intent_is_returned_alongside_slots_from_one_call(self) -> None:
+        payload = {k: [] for k in list(ASK_ATTRIBUTES) + ["rejected", "no_preference"]}
+        payload["category"] = ["boots"]
+        payload["intent"] = "Buying"
+        self._serve(json.dumps(payload), {"prompt_tokens": 20, "completion_tokens": 4})
         state = DialogueState(turn=3)
-        state.session_profile["category"] = ["boots"]
-        label = classify_intent("I want boots under 100", state)
-        self.assertEqual(label["intent"], "Buying")
-        sent = json.loads(self.captured["body"]["messages"][1]["content"])
-        self.assertEqual(sent["filled_attributes"], ["category"])
-        self.assertNotIn("boots", json.dumps(sent["filled_attributes"]))
+        extracted = extract_slots("I want boots under 100", state)
+        self.assertEqual(extracted["intent"], "Buying")
+        self.assertEqual(extracted["category"], ["boots"])
+        # One call did both jobs: only one request was ever captured.
+        self.assertEqual(self.captured["body"]["messages"][0]["role"], "system")
 
-    def test_confidence_is_clamped(self) -> None:
-        self._serve(json.dumps({"signal": "x", "intent": "Buying", "confidence": 1.4}),
-                    {"prompt_tokens": 1, "completion_tokens": 1})
-        self.assertEqual(classify_intent("hi", DialogueState())["confidence"], 1.0)
-
-    def test_label_outside_enum_is_a_failure_not_a_default(self) -> None:
-        self._serve(json.dumps({"signal": "x", "intent": "Lurking", "confidence": 0.9}),
-                    {"prompt_tokens": 1, "completion_tokens": 1})
-        label = classify_intent("hi", DialogueState())
-        self.assertIsNone(label["intent"])
-        self.assertEqual(label["confidence"], 0.0)
+    def test_intent_outside_enum_is_dropped_not_defaulted(self) -> None:
+        payload = {k: [] for k in list(ASK_ATTRIBUTES) + ["rejected", "no_preference"]}
+        payload["intent"] = "Lurking"
+        self._serve(json.dumps(payload), {"prompt_tokens": 1, "completion_tokens": 1})
+        self.assertNotIn("intent", extract_slots("hi", DialogueState()))
 
     def test_missing_credentials_degrade_quietly(self) -> None:
         import os
         os.environ.pop("LLM_API_KEY", None)
         self.assertEqual(extract_slots("boots", DialogueState()), {})
-        label = classify_intent("boots", DialogueState())
-        self.assertIsNone(label["intent"])
-        self.assertEqual(label["error"], "no_credentials")
 
     def test_usage_meter_accumulates_then_drains(self) -> None:
         self._serve(json.dumps({k: [] for k in list(ASK_ATTRIBUTES) + ["rejected", "no_preference"]}),
@@ -459,10 +481,13 @@ class FullTurnLoopTests(unittest.TestCase):
         asks = {1: "color", 2: "brand", 3: "size", 4: None, 5: None}
         state = tracker.reset("loop", {"preference_tags": ["comfort"]})
 
+        turn_four_summary = None
         for turn in range(1, 6):
             state = tracker.update("m", state, turn=turn)
-            context = distill(tracker.get_transition_log("loop"), state)
+            context = distill(tracker.get_history_summary("loop"), state)
             json.dumps(context)
+            if turn == 4:
+                turn_four_summary = tracker.get_history_summary("loop")
             tracker.record_ask(state, asks[turn])
             tracker.record_recommendations(state, [f"B{turn}"])
 
@@ -474,17 +499,19 @@ class FullTurnLoopTests(unittest.TestCase):
         self.assertTrue(state.conflicts_with_previous)
         self.assertEqual(state.previous_top_10, ["B5"])
 
-        reasons = [e["trigger_reason"] for e in tracker.get_transition_log("loop")]
-        self.assertEqual(reasons[3], "no_slots_extracted")
-        self.assertIn(5, context["long_term"]["override_turns"])
+        # Turn 4's extractor returned {}: nothing should have been recorded as
+        # touched on that turn specifically, even though the session overall
+        # has plenty of history by then.
+        self.assertEqual(turn_four_summary["last_turn_attributes"], [])
+        self.assertIn(5, context["session_summary"]["override_turns"])
         self.assertEqual(context["short_term"]["focus_attributes"], ["budget", "category"])
 
     def test_sessions_are_isolated(self) -> None:
         tracker = DialogueStateTracker(extractor=scripted({1: {"category": ["boots"]}}))
         a = tracker.update("m", tracker.reset("a", {}), turn=1)
         b = tracker.update("m", tracker.reset("b", {}), turn=1)
-        self.assertEqual(len(tracker.get_transition_log("a")), 1)
-        self.assertEqual(len(tracker.get_transition_log("b")), 1)
+        self.assertEqual(tracker.get_history_summary("a")["turns_observed"], 1)
+        self.assertEqual(tracker.get_history_summary("b")["turns_observed"], 1)
         self.assertEqual(a.session_id, "a")
         self.assertEqual(b.session_id, "b")
 

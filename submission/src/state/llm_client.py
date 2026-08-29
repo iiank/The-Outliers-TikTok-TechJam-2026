@@ -1,7 +1,7 @@
 """Schema-constrained LLM transport for the TechJam shopping agent.
 
-One small client shared by :mod:`state.llm_extractor` and
-:mod:`state.intent_classifier`. It speaks the OpenAI-compatible
+The transport behind :mod:`state.llm_extractor`'s joint intent-and-slot call.
+It speaks the OpenAI-compatible
 ``POST {base_url}/chat/completions`` shape, which every free-tier endpoint the
 team is likely to use already exposes, so the provider is an environment
 variable rather than a code change:
@@ -28,18 +28,9 @@ Verified shapes for the defaults, and the drop-in alternatives::
     LLM_BASE_URL=https://api.groq.com/openai/v1
     LLM_MODEL=openai/gpt-oss-120b
 
-    # OpenRouter, free tier
-    LLM_BASE_URL=https://openrouter.ai/api/v1
-    LLM_MODEL=meta-llama/llama-3.3-70b-instruct:free
-
     # Google Gemini, OpenAI-compatibility endpoint
     LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
     LLM_MODEL=gemini-2.0-flash
-
-    # Local Ollama, no key needed but LLM_API_KEY must still be non-empty
-    LLM_BASE_URL=http://localhost:11434/v1
-    LLM_MODEL=llama3.1
-    LLM_API_KEY=ollama
 
 Two invariants the callers depend on:
 
@@ -102,12 +93,6 @@ DEFAULT_MAX_ATTEMPTS = 2
 #: tokens reached before generating a valid document"). 512 was enough for slot
 #: extraction and failed ~75% of intent classifications.
 DEFAULT_MAX_TOKENS = 2048
-
-#: Sent on every request. Required, not cosmetic: several providers (Groq
-#: included) sit behind a Cloudflare WAF that rejects urllib's default
-#: ``Python-urllib/3.x`` agent with HTTP 403 and Cloudflare ``error code: 1010``
-#: before the request ever reaches the API. An honest, identifiable agent string
-#: passes. Override with ``LLM_USER_AGENT`` if a provider wants something else.
 DEFAULT_USER_AGENT = "outliers-techjam-agent/1.0 (+python-urllib)"
 
 #: Transient statuses worth one more try. 400/401/404 are configuration bugs and
@@ -219,8 +204,8 @@ _WARN_LOCK = threading.Lock()
 def _warn_once(key: str, message: str) -> None:
     """Log ``message`` the first time ``key`` is seen.
 
-    A missing key would otherwise be invisible: every turn just logs
-    ``no_slots_extracted`` and the run looks like the old stub.
+    A missing key would otherwise be invisible: every turn just returns ``{}``
+    and the run looks like the old no-op stub.
     """
     with _WARN_LOCK:
         if key in _WARNED:
@@ -319,9 +304,9 @@ def call_json(
         _warn_once(
             "no_credentials",
             "LLM_API_KEY is not set: state.llm_client returns no data, so slot "
-            "extraction and intent classification degrade to 'no information'. "
-            "Every turn will log no_slots_extracted. Export LLM_API_KEY (and "
-            "optionally LLM_BASE_URL / LLM_MODEL) to enable them.",
+            "extraction and intent detection both degrade to 'no information' "
+            "every turn. Export LLM_API_KEY (and optionally LLM_BASE_URL / "
+            "LLM_MODEL) to enable them.",
         )
         return LLMResult(error="no_credentials")
 

@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 __all__ = [
     "ASK_ATTRIBUTES",
+    "INTENT_LABELS",
     "SLOT_KEYS",
     "DialogueState",
     "DialogueStateTracker",
@@ -58,6 +59,10 @@ ASK_ATTRIBUTES: Tuple[str, ...] = (
 )
 
 SLOT_KEYS: Tuple[str, ...] = ASK_ATTRIBUTES + ("rejected",)
+
+#: Buying vs. Browsing (Pillar I, dual-track routing). Set from the same joint
+#: extraction call that fills the slots above — see ``state.llm_extractor``.
+INTENT_LABELS: Tuple[str, ...] = ("Buying", "Browsing")
 
 #: Slots where a second, different value contradicts the first instead of
 #: refining it. A structural check on already-extracted values, so it catches an
@@ -116,6 +121,11 @@ class DialogueState:
             avoid asking the same thing twice running.
         conflicts_with_previous: True when this turn's utterance contradicted
             existing state. Recomputed every turn, so it is not sticky.
+        intent: ``"Buying"``, ``"Browsing"``, or ``None`` when this turn's
+            joint extraction call did not resolve one (empty message, API
+            failure, or an out-of-enum reply). Recomputed every turn from the
+            same call that fills ``session_profile``, so it is not sticky
+            either — do not read ``None`` as a default label.
     """
 
     session_id: str = ""
@@ -125,6 +135,7 @@ class DialogueState:
     previous_top_10: List[str] = field(default_factory=list)
     previous_ask_attribute: str = ""
     conflicts_with_previous: bool = False
+    intent: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a deep-copied, JSON-serializable view of this state.
@@ -150,6 +161,7 @@ class DialogueState:
             previous_top_10=_as_str_list(payload.get("previous_top_10")),
             previous_ask_attribute=asked if asked in ASK_ATTRIBUTES else "",
             conflicts_with_previous=bool(payload.get("conflicts_with_previous", False)),
+            intent=payload.get("intent") if payload.get("intent") in INTENT_LABELS else None,
         )
 
     def copy(self) -> "DialogueState":
@@ -254,7 +266,10 @@ def no_preference_attributes(session_profile: Mapping[str, Any]) -> List[str]:
     ]
 
 
-SlotExtractor = Callable[[str, DialogueState], Dict[str, List[str]]]
+#: Return type is ``Dict[str, Any]``, not ``Dict[str, List[str]]``, because the
+#: one optional ``"intent"`` key holds a bare string (``"Buying"``/``"Browsing"``),
+#: not a list — every other key is still a list of strings.
+SlotExtractor = Callable[[str, DialogueState], Dict[str, Any]]
 
 
 def _clean(value: str) -> str:
@@ -288,15 +303,17 @@ def _add(slots: Dict[str, List[str]], attribute: str, value: str) -> None:
     bucket.append(cleaned)
 
 
-def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, List[str]]:
-    """No-op extractor. Returns ``{}``, so no slot ever fills.
+def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, Any]:
+    """No-op extractor. Returns ``{}``, so no slot ever fills and intent stays unknown.
 
     This is the module's default so that importing ``dialogue_state`` never
     touches the network. It is also the shape every real extractor must match:
     the tracker derives *all* of its state changes from this return value, so
     anything not reported here does not happen.
 
-    The LLM-backed implementation is :func:`state.llm_extractor.extract_slots`.
+    The LLM-backed implementation is :func:`state.llm_extractor.extract_slots`,
+    which does joint intent detection and slot filling in one call — the
+    standard NLU pattern, rather than two separate calls for the two tasks.
     Inject it with ``DialogueStateTracker(extractor=...)``; nothing else in this
     module changes.
 
@@ -307,8 +324,8 @@ def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, 
             refinement from a retraction without seeing what is already held.
 
     Returns:
-        ``{attribute: [values]}`` for the attributes stated in this message. Keys
-        must come from :data:`ASK_ATTRIBUTES`, with two optional extra keys:
+        ``{attribute: [values]}`` for the attributes stated in this message, plus
+        two optional control keys and one optional label:
 
         ``"rejected"``: values the customer just dropped, copied as they appear
         in ``current_state.session_profile``. The tracker removes each one from
@@ -325,16 +342,20 @@ def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, 
         no-preference does not clear a value the slot already holds; name that
         value in ``rejected`` as well if the customer withdrew it.
 
-        Values are always arrays of strings. ``budget`` values must already be
-        normalized to ``"<=45"``, ``">=45"``, or ``"~45"``; a range is two
-        values. Nothing downstream parses prose prices.
+        ``"intent"``: a bare string, one of :data:`INTENT_LABELS`, or left out
+        when unresolved. Unlike the keys above it is not a list and it never
+        touches ``session_profile`` — the tracker reads it straight onto
+        :attr:`DialogueState.intent`.
+
+        Attribute values are always arrays of strings. ``budget`` values must
+        already be normalized to ``"<=45"``, ``">=45"``, or ``"~45"``; a range
+        is two values. Nothing downstream parses prose prices.
 
         Return ``{}`` on an API error, timeout, or schema mismatch. There is no
         pattern-matching layer behind this call, so a failed turn degrades to
-        "no new information for this turn": the tracker logs
-        ``no_slots_extracted`` and the state carries forward unchanged. That is
-        deliberate — the harness counts a raised exception as a miss, per
-        docs/competition_specification.md, so never raise.
+        "no new information for this turn": the state carries forward
+        unchanged. That is deliberate — the harness counts a raised exception
+        as a miss, per docs/competition_specification.md, so never raise.
 
         Report the call's prompt and completion token counts for the response
         ``usage`` field. Since the return type has no room for them, record them
@@ -342,6 +363,29 @@ def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, 
         once per turn.
     """
     return {}
+
+
+class _SessionHistory:
+    """Compact, incrementally-updated bookkeeping for one session.
+
+    Everything :mod:`state.context_distiller` needs beyond the current state —
+    when each currently-held value first appeared, how many times an attribute
+    was revised, where a rejected value came from, which turns had an
+    override — kept as a handful of small dicts sized to the number of
+    distinct values and attributes ever touched, not to the number of turns.
+    Updated once per turn in :meth:`DialogueStateTracker.update`; nothing ever
+    replays a log to rebuild it, because nothing keeps one.
+    """
+
+    def __init__(self) -> None:
+        self.value_first_seen: Dict[Tuple[str, str], int] = {}
+        self.attribute_last_touched: Dict[str, int] = {}
+        self.attribute_revisions: Dict[str, int] = {}
+        self.rejection_origin: Dict[str, Tuple[str, int]] = {}
+        self.override_turns: List[int] = []
+        self.mentioned_values: set = set()
+        self.last_turn_attributes: List[str] = []
+        self.turns_observed: int = 0
 
 
 class DialogueStateTracker:
@@ -361,7 +405,7 @@ class DialogueStateTracker:
     def __init__(self, extractor: Optional[SlotExtractor] = None) -> None:
         self.extractor: SlotExtractor = extractor or extract_slots
         self._states: Dict[str, DialogueState] = {}
-        self._transition_log: List[Dict[str, Any]] = []
+        self._histories: Dict[str, _SessionHistory] = {}
 
     def reset(self, session_id: str, user_profile: Optional[Mapping[str, Any]] = None) -> DialogueState:
         """Start a fresh session, mirroring ``Agent.reset``.
@@ -378,8 +422,10 @@ class DialogueStateTracker:
             previous_top_10=[],
             previous_ask_attribute="",
             conflicts_with_previous=False,
+            intent=None,
         )
         self._states[state.session_id] = state
+        self._histories[state.session_id] = _SessionHistory()
         return state
 
     def get_state(self, session_id: str) -> DialogueState:
@@ -449,22 +495,32 @@ class DialogueStateTracker:
                 ``current_state.turn + 1``.
 
         Returns:
-            A new :class:`DialogueState`. ``conflicts_with_previous`` covers this
-            turn only.
+            A new :class:`DialogueState`. ``conflicts_with_previous`` and
+            ``intent`` both cover this turn only.
 
         Every change below comes from the extractor's return value. This method
         never inspects ``user_message`` itself, so an extractor that returns
         ``{}`` — including on an API failure — means "no new information this
-        turn" and the state carries forward untouched.
+        turn" and the state carries forward untouched, except ``intent``, which
+        resets to ``None`` rather than carrying the previous turn's label.
         """
-        old_snapshot = current_state.to_dict()
         state = current_state.copy()
         state.turn = current_state.turn + 1 if turn is None else int(turn)
         state.conflicts_with_previous = False
-        reasons: List[str] = []
+        # Attributes this turn actually replaced or retracted a held value on,
+        # for the revision count in _update_history. Not a general debug trace —
+        # nothing else reads this, so it only tracks what that one method needs.
+        revised_attributes: set = set()
         message = user_message or ""
 
         extracted = dict(self.extractor(message, current_state) or {})
+
+        # Intent is read from the same joint call as the slots, but it is not a
+        # slot: it never enters session_profile and it is not sticky like a
+        # constraint would be — a failed or empty turn means "unknown this
+        # turn", not "still whatever it was last turn".
+        raw_intent = extracted.pop("intent", None)
+        state.intent = raw_intent if raw_intent in INTENT_LABELS else None
 
         # (a) Retractions named by the extractor. An LLM that sees the current
         #     slots can say exactly what the customer dropped, which no pattern
@@ -490,7 +546,7 @@ class DialogueStateTracker:
                             if dropped not in state.session_profile["rejected"]:
                                 state.session_profile["rejected"].append(dropped)
                     state.session_profile[attribute] = kept
-                    reasons.append(f"retracted:{attribute}")
+                    revised_attributes.add(attribute)
             displaced.add(value.lower())
             if value not in state.session_profile["rejected"]:
                 state.session_profile["rejected"].append(value)
@@ -503,7 +559,6 @@ class DialogueStateTracker:
         raw_declined = extracted.pop("no_preference", None) or []
         if isinstance(raw_declined, str):
             raw_declined = [raw_declined]
-        declined: List[str] = []
         for value in raw_declined:
             attribute = _clean(str(value)).lower()
             if not attribute:
@@ -513,8 +568,6 @@ class DialogueStateTracker:
             marker = f"no_preference:{attribute}"
             if marker not in state.session_profile["rejected"]:
                 state.session_profile["rejected"].append(marker)
-            declined.append(attribute)
-            reasons.append(f"no_preference_declared:{attribute}")
 
         # (c) Apply new values, moving whatever they contradict to `rejected`.
         #     The only conflict test left is structural: a second, different
@@ -534,13 +587,12 @@ class DialogueStateTracker:
             )
             if incompatible:
                 state.conflicts_with_previous = True
-                reasons.append(f"slot_replaced:{attribute}")
+                revised_attributes.add(attribute)
                 for stale in existing:
                     displaced.add(stale.lower())
                     if stale not in state.session_profile["rejected"]:
                         state.session_profile["rejected"].append(stale)
                 state.session_profile[attribute] = []
-            before = len(state.session_profile[attribute])
             for value in values:
                 # A value dropped earlier this turn is not taken back: "forget
                 # the running shoes, I want hiking boots" only mentions
@@ -548,48 +600,70 @@ class DialogueStateTracker:
                 if value.lower() in displaced:
                     continue
                 _add(state.session_profile, attribute, value)
-            if not incompatible and len(state.session_profile[attribute]) > before:
-                reasons.append(f"slot_filled:{attribute}")
 
-        # Nothing reported at all: an unremarkable turn, or a failed API call.
-        # Both mean the same thing to every downstream module.
-        if not extracted and not retracted and not declined:
-            reasons.append("no_slots_extracted")
-
-        return self._commit(state, old_snapshot, reasons)
-
-    def _commit(
-        self,
-        state: DialogueState,
-        old_snapshot: Dict[str, Any],
-        reasons: List[str],
-    ) -> DialogueState:
-        """Cache the new state and add a transition-log entry."""
         self._states[state.session_id] = state
-        self._transition_log.append(
-            {
-                "turn": state.turn,
-                "old_state": old_snapshot,
-                "new_state": state.to_dict(),
-                "trigger_reason": ", ".join(reasons) if reasons else "no_change",
-            }
-        )
+        history = self._histories.setdefault(state.session_id, _SessionHistory())
+        self._update_history(history, current_state, state, revised_attributes)
         return state
 
-    def get_transition_log(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Return the transition log, JSON-serializable, oldest first.
+    def _update_history(
+        self,
+        history: "_SessionHistory",
+        current_state: DialogueState,
+        state: DialogueState,
+        revised_attributes: "set",
+    ) -> None:
+        """Fold one turn into ``history`` in place.
 
-        Each entry is ``{turn, old_state, new_state, trigger_reason}``. Pass
-        ``session_id`` to filter to one session.
+        One before/after diff of ``session_profile``, done once as the turn
+        happens, in place of replaying a growing log of full snapshots later.
+        Same information context_distiller needs, computed at O(attributes)
+        per turn instead of O(turns) every time distill() is called.
         """
-        if session_id is None:
-            return copy.deepcopy(self._transition_log)
-        wanted = str(session_id)
-        return [
-            copy.deepcopy(entry)
-            for entry in self._transition_log
-            if entry["new_state"].get("session_id") == wanted
-        ]
+        history.turns_observed += 1
+        touched: set = set()
+        for attribute in ASK_ATTRIBUTES:
+            before = {value.lower() for value in current_state.session_profile.get(attribute, [])}
+            after = {value.lower() for value in state.session_profile.get(attribute, [])}
+            for folded in after - before:
+                history.value_first_seen.setdefault((attribute, folded), state.turn)
+                history.mentioned_values.add(folded)
+                history.attribute_last_touched[attribute] = state.turn
+                touched.add(attribute)
+            for folded in before - after:
+                history.rejection_origin[folded] = (attribute, state.turn)
+                touched.add(attribute)
+        for attribute in revised_attributes:
+            history.attribute_revisions[attribute] = history.attribute_revisions.get(attribute, 0) + 1
+        history.last_turn_attributes = sorted(touched)
+        if state.conflicts_with_previous:
+            history.override_turns.append(state.turn)
+
+    def get_history_summary(self, session_id: str) -> Dict[str, Any]:
+        """A compact, JSON-serializable view of one session's history so far.
+
+        This is what :mod:`state.context_distiller` reads instead of a
+        transition log: a handful of small dicts sized to the number of
+        distinct values and attributes ever touched, not to turns times a full
+        state snapshot each.
+        """
+        history = self._histories.get(str(session_id)) or _SessionHistory()
+        value_first_seen: Dict[str, Dict[str, int]] = {}
+        for (attribute, folded), seen_turn in history.value_first_seen.items():
+            value_first_seen.setdefault(attribute, {})[folded] = seen_turn
+        return {
+            "value_first_seen": value_first_seen,
+            "attribute_last_touched": dict(history.attribute_last_touched),
+            "attribute_revisions": dict(history.attribute_revisions),
+            "rejection_origin": {
+                folded: [attribute, dropped_turn]
+                for folded, (attribute, dropped_turn) in history.rejection_origin.items()
+            },
+            "override_turns": list(history.override_turns),
+            "mentioned_values": sorted(history.mentioned_values),
+            "last_turn_attributes": list(history.last_turn_attributes),
+            "turns_observed": history.turns_observed,
+        }
 
 
 def _same_values(existing: List[str], incoming: List[str]) -> bool:

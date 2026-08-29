@@ -6,10 +6,14 @@ reads. One function reads the words. Everything else works from the object.
 | File | Job | Calls an LLM |
 | --- | --- | --- |
 | [dialogue_state.py](dialogue_state.py) | Holds the state, applies changes | no |
-| [llm_extractor.py](llm_extractor.py) | Words to slots | yes |
-| [intent_classifier.py](intent_classifier.py) | Words to Buying/Browsing | yes |
+| [llm_extractor.py](llm_extractor.py) | Words to slots and Buying/Browsing, in one call | yes |
 | [context_distiller.py](context_distiller.py) | History to what we trust | no |
 | [llm_client.py](llm_client.py) | Shared HTTP plumbing | yes |
+
+`llm_extractor.py` does joint intent detection and slot filling — one schema,
+one request, both answers. This is the standard NLU pattern (the two tasks are
+correlated: an intent's likely slots inform the slots and vice versa), not two
+independent calls for two independent questions.
 
 ---
 
@@ -18,18 +22,14 @@ reads. One function reads the words. Everything else works from the object.
 ```text
 Phase 0  reset()            once per session
    |
-Phase 1  extract_slots()    words  ->  {"category": ["boots"], ...}
+Phase 1  extract_slots()    words  ->  {"category": ["boots"], ..., "intent": "Buying"}
    |
-Phase 2  update()           slots  ->  new DialogueState
+Phase 2  update()           slots + intent  ->  new DialogueState
    |
-   +--> Phase 3  classify_intent()  ->  "Buying" / "Browsing"
-   +--> Phase 4  distill()          ->  {"short_term", "long_term"}
+   +--> Phase 3  distill()          ->  {"short_term", "session_summary"}
    |
-Phase 5  record_ask(), record_recommendations(), drain_usage()
+Phase 4  record_ask(), record_recommendations(), drain_usage()
 ```
-
-Phases 3 and 4 both read the state Phase 2 produced. They do not depend on each
-other, so they can run at the same time. Phase 5 always runs last.
 
 ---
 
@@ -48,43 +48,96 @@ tracker = DialogueStateTracker(extractor=extract_slots)   # once, in Agent.__ini
 state = tracker.reset(session_id, user_profile)           # in Agent.reset
 ```
 
+**Example** — this is the running example threaded through every phase below:
+
+```python
+reset("sess-42", {
+    "purchase_frequency": "occasional",
+    "average_prior_rating": 4.2,
+    "rating_style": "generous",
+    "preference_tags": ["road running", "comfort"],
+    "summary": "Casual shopper, buys athletic wear a few times a year.",
+})
+```
+
+```python
+DialogueState(
+    session_id="sess-42", turn=0,
+    session_profile={"category": [], "material": [], "color": [], "size": [], "style": [],
+                      "brand": [], "budget": [], "feature": [], "use_case": [], "other": [],
+                      "rejected": []},
+    user_profile={"purchase_frequency": "occasional", "average_prior_rating": 4.2,
+                  "rating_style": "generous", "preference_tags": ["road running", "comfort"],
+                  "summary": "Casual shopper, buys athletic wear a few times a year."},
+    previous_top_10=[], previous_ask_attribute="",
+    conflicts_with_previous=False, intent=None,
+)
+```
+
 ---
 
 ### Phase 1: read the words
 
-**What it does:** the only place in the agent that reads natural language.
+**What it does:** the only place in the agent that reads natural language —
+and the only LLM call in the whole state layer.
 
 | | |
 | --- | --- |
 | **In** | the raw message, plus the slots we already hold |
 | **Does** | one LLM call with a strict JSON schema |
-| **Out** | a `dict` of just what changed, or `{}` |
+| **Out** | a `dict` of just what changed, plus `intent`, or `{}` |
 
 The model is shown the current slots on purpose. "Boots instead" only means
 something if you know what it replaces, so showing the slots is what lets the
-model name the old value precisely.
+model name the old value precisely. The same context (how many slots are
+already filled) is also what it uses to judge Buying versus Browsing: a
+confidently-worded opener with nothing filled in yet is usually still
+Browsing, and a vague-sounding message late in a well-specified session is
+usually still Buying.
 
 ```python
 extract_slots("actually hiking boots instead, under $120", state)
-# {"category": ["hiking boots"], "budget": ["<=120"], "rejected": ["running shoes"]}
+# {"category": ["hiking boots"], "budget": ["<=120"], "rejected": ["running shoes"], "intent": "Buying"}
 ```
 
-Three kinds of key come back:
+**Example** — continuing the running example, turn 1 (`state` is the fresh one from Phase 0):
+
+```python
+extract_slots("I need black waterproof hiking boots under $120", state)
+# {"intent": "Buying", "category": ["hiking boots"], "color": ["black"],
+#  "budget": ["<=120"], "feature": ["waterproof"]}
+```
+
+**Example** — turn 2, after `record_ask(state, "size")` set `previous_ask_attribute="size"`.
+The bare reply resolves against that context instead of landing in `other`:
+
+```python
+extract_slots("US 9", state)
+# {"intent": "Buying", "size": ["US 9"]}
+```
+
+Four kinds of key come back:
 
 | Key | Holds |
 | --- | --- |
-| the ten attribute names | new or changed values |
+| the ten attribute names | new or changed values, each a list |
 | `rejected` | **values** the customer dropped, copied exactly from the current slots |
 | `no_preference` | attribute **names** they refuse to constrain ("any colour is fine") |
+| `intent` | a bare string, `"Buying"` or `"Browsing"` — not a list, and not a slot |
 
 `rejected` is values, `no_preference` is names. That is the easy thing to mix up.
 
 `budget` arrives already normalized as `"<=120"`, `">=25"`, or `"~60"`, so
 nothing downstream reads prose prices.
 
-`{}` means nothing new. A failed API call also returns `{}`, and the two are
-deliberately identical. There is no keyword fallback underneath, so a bad turn
-becomes "no new information" instead of a guess.
+`intent` is two labels, not four. The public set also labels sessions Intent
+Override and Boundary, but the state already reports those without any extra
+model reasoning (`conflicts_with_previous` and `no_preference_attributes()`).
+An override session is still Buying or Browsing on every turn.
+
+`{}` means nothing new and no intent resolved. A failed API call also returns
+`{}`, and the two are deliberately identical. There is no keyword fallback
+underneath, so a bad turn becomes "no new information" instead of a guess.
 
 ---
 
@@ -95,11 +148,26 @@ becomes "no new information" instead of a guess.
 | | |
 | --- | --- |
 | **In** | the raw message (passed straight to Phase 1), the current state |
-| **Does** | applies retractions, then no-preference marks, then new values |
-| **Out** | a **new** `DialogueState`, plus a log entry |
+| **Does** | applies retractions, then no-preference marks, then new values, then sets `intent` |
+| **Out** | a **new** `DialogueState`, plus an incremental history update |
 
 ```python
 state = tracker.update(user_message, tracker.get_state(session_id), turn=turn)
+```
+
+**Example** — continuing the running example, folding Phase 1's turn-1 output into the
+fresh state from Phase 0:
+
+```python
+DialogueState(
+    session_id="sess-42", turn=1,
+    session_profile={"category": ["hiking boots"], "material": [], "color": ["black"],
+                      "size": [], "style": [], "brand": [], "budget": ["<=120"],
+                      "feature": ["waterproof"], "use_case": [], "other": [], "rejected": []},
+    user_profile={...same as Phase 0...},
+    previous_top_10=[], previous_ask_attribute="",
+    conflicts_with_previous=False, intent="Buying",
+)
 ```
 
 In order:
@@ -113,96 +181,134 @@ In order:
    the old value moves to `rejected` and the conflict flag is set. This is the
    safety net for when the extractor adds a value but forgets to name the one it
    replaced.
+4. **Intent.** Read straight onto `state.intent`. Not sticky: a turn with no
+   resolved intent sets it to `None` rather than carrying the previous label
+   forward. Branch on `None`; do not read it as Browsing, since this is a label,
+   not a routing decision.
 
 `update()` never looks at the message text itself. Every change above comes from
 Phase 1's return value. That is why an API failure is harmless: `{}` in means
-nothing changes, and the log says `no_slots_extracted`.
+nothing changes except `intent`, which resets to `None`.
 
 The old state is never modified, so you can keep it and compare.
 
 ---
 
-### Phase 3: label the intent
-
-**What it does:** says whether the customer is Buying or Browsing.
-
-| | |
-| --- | --- |
-| **In** | the raw message, plus which attributes are filled and which are missing |
-| **Does** | one LLM call with a two-value enum |
-| **Out** | `{"intent", "confidence", "signal", "usage", "error"}` |
-
-```python
-intent = classify_intent(user_message, state)
-# {"intent": "Buying", "confidence": 0.92, "signal": "names a product and a price cap", ...}
-```
-
-The model gets attribute **names** only, not their values, because the label
-depends on how far the session has converged rather than on what was chosen.
-
-Two labels, not four. The public set also labels sessions Intent Override and
-Boundary, but the state already reports those without a model call
-(`conflicts_with_previous` and `no_preference_attributes()`). An override session
-is still Buying or Browsing on every turn.
-
-On failure `intent` is `None`. Branch on it. Do not read it as Browsing, because
-this module deliberately makes no routing decision.
-
----
-
-### Phase 4: distill the history
+### Phase 3: distill the history
 
 **What it does:** works out which constraints to trust. No LLM call.
 
 | | |
 | --- | --- |
-| **In** | the transition log, plus the current state |
-| **Does** | one pass over the log, comparing each turn to the one before |
-| **Out** | `{"short_term": ..., "long_term": ...}` |
+| **In** | the tracker's incremental history summary, plus the current state |
+| **Does** | reads a handful of small dicts the tracker already maintains — no scan over turn history |
+| **Out** | `{"short_term": ..., "session_summary": ...}` |
+
+Two very different things come back, and the split is what to read *now* versus what to
+carry forward *for the rest of this session*:
+
+- **`short_term`** is a snapshot of right now. It changes every turn, in lockstep with
+  `session_profile` — it's the same information, just compressed and ordered for a
+  ranking prompt instead of shaped for `update()` to write to.
+- **`session_summary`** is a judgement about the session's *arc so far*, not this one
+  turn: has the customer contradicted themselves anywhere, does what they've actually
+  said support the profile the harness handed you, and — bundled for convenience — what
+  should the rest of this session keep biasing toward. It is **not** cross-session
+  memory: `reset_request` gives no identifier linking two sessions for the same
+  customer, so nothing written here could ever be read back on a future session. Despite
+  the name, nothing here outlives this one session.
 
 ```python
-context = distill(tracker.get_transition_log(session_id), state)
+context = distill(tracker.get_history_summary(session_id), state)
 ```
 
-**`short_term`** is small enough to paste into a ranking prompt:
+**Example** — continuing the running example, still turn 1 (everything is freshly stated,
+so every constraint has `revisions=0` and `turns_held=1`):
+
+```python
+{
+  "schema_version": 4, "session_id": "sess-42", "turn": 1, "turns_observed": 1,
+  "short_term": {
+    "constraints": [
+      {"attribute": "budget", "values": ["<=120"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
+      {"attribute": "category", "values": ["hiking boots"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
+      {"attribute": "color", "values": ["black"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
+      {"attribute": "feature", "values": ["waterproof"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0}
+    ],
+    "avoid": [], "declined_attributes": [],
+    "open_attributes": ["material", "size", "style", "brand", "use_case", "other"],
+    "unstable_attributes": [],
+    "focus_attributes": ["budget", "category", "color", "feature"],
+    "digest": "Wants: budget=<=120; category=hiking boots; color=black; feature=waterproof. Just changed: budget, category, color, feature."
+  },
+  "session_summary": {
+    "override_turns": [],
+    "profile_corroboration": {"confirmed": [], "unobserved": ["road running", "comfort"]},
+    "carry_forward": {
+      "prefer": ["hiking boots", "black", "<=120", "waterproof"],
+      "avoid": [], "indifferent_attributes": [], "confirmed_tags": [], "led_with": "budget"
+    }
+  }
+}
+```
+
+`profile_corroboration` puts both tags in `unobserved` here — the customer hasn't said
+anything about running or comfort yet, so the aggregate profile's prior is not yet
+confirmed by this session. That would move to `confirmed` the moment either word shows
+up in something the customer actually says. That is the kind of judgement `short_term`
+cannot make on its own: it only knows the current slots, not whether those slots
+corroborate a prior.
+
+**`short_term`** fields, all recomputed from scratch every turn:
 
 | Field | What it adds that the raw state cannot |
 | --- | --- |
-| `constraints` | every filled slot, **sorted by confidence**. The raw state has no ordering and makes every slot look equally certain. |
+| `constraints` | every filled slot, with `first_seen_turn`, `last_touched_turn`, `turns_held`, and `revisions` — plain facts, sorted alphabetically by attribute for a deterministic order. No score: a consumer that wants to prioritize one constraint over another computes that itself from these fields. |
 | `avoid` | each rejected value with the slot it came from and the turn it was dropped |
 | `declined_attributes` | attributes the customer refused to constrain |
 | `open_attributes` | still worth asking about |
-| `unstable_attributes` | slots the customer has already rewritten |
+| `unstable_attributes` | slots the customer has already rewritten (`revisions > 0`) |
 | `focus_attributes` | what changed this turn. On an override turn, this is what to weight up. |
 | `digest` | all of the above as one line of text |
 
-`confidence` starts at 0.55, gains 0.10 per turn survived (capped at 3), loses
-0.15 per revision, gains 0.10 if touched this turn, then is clamped to the range
-0.15 to 0.95. It is a rough band, not a probability. Ties are normal and break
-alphabetically so the output is stable between runs. Use it to decide which
-constraint wins a conflict.
+**`session_summary`** fields, each a pattern over the session rather than a fact about
+this one turn:
 
-**`long_term`** is patterns meant to outlive the session: `stable_preferences`,
-`abandoned_preferences`, `refinement_count`, `revision_profile`, `volatility`,
-`decisiveness`, `override_turns`, `profile_corroboration` (which
-`preference_tags` this session actually supports), and `carry_forward`.
-
-The useful contrast is `refinement_count` against `volatility`. Sharpening a
-request ("leather" becoming "full-grain leather") is a customer who knows what
-they want. Rewriting it is one who does not. The raw state cannot tell them
-apart, because both look like a slot that changed.
+| Field | What it's a judgement about |
+| --- | --- |
+| `override_turns` | has the customer contradicted an earlier stated preference, and on which turns |
+| `profile_corroboration` | does anything the customer has actually said this session support the `preference_tags` the harness handed you at `reset()` |
+| `carry_forward` | one bundled view of what to keep biasing toward for the rest of *this* session — `prefer` / `avoid` / `indifferent_attributes` / `confirmed_tags` — so a caller doesn't re-derive it from `session_profile` and `rejected` separately every turn |
 
 ---
 
-### Phase 5: save what you are about to send
+### Phase 4: save what you are about to send
 
 **What it does:** lets the next turn understand the reply.
 
 ```python
 tracker.record_ask(state, ask_attribute)                  # what we asked
 tracker.record_recommendations(state, parent_asins)       # what we showed
-return {..., "usage": drain_usage()}                      # both LLM calls, this turn
+return {..., "usage": drain_usage()}                      # this turn's one LLM call
 ```
+
+**Example** — continuing the running example: we ask about `size` next and show two
+candidates (a duplicate is deduped automatically):
+
+```python
+tracker.record_ask(state, "size")
+tracker.record_recommendations(state, ["B001", "B002", "B001"])
+```
+
+```python
+# state now carries, ready for the next turn's extract_slots() call:
+previous_ask_attribute="size"
+previous_top_10=["B001", "B002"]
+```
+
+This is exactly what makes Phase 1's turn-2 example above work: `extract_slots("US 9",
+state)` sees `previous_ask_attribute="size"` and resolves the bare reply to the right
+slot instead of guessing.
 
 `record_ask` matters more than it looks. If we asked about colour and the
 customer replies just "black", the extractor needs to know what the question was.
@@ -217,7 +323,6 @@ Skipping it costs accuracy, not correctness.
 ```python
 from state.dialogue_state import DialogueStateTracker
 from state.llm_extractor import extract_slots
-from state.intent_classifier import classify_intent
 from state.context_distiller import distill
 from state.llm_client import drain_usage
 
@@ -228,10 +333,9 @@ state = tracker.reset(session_id, user_profile)
 
 # Agent.respond
 state = tracker.update(user_message, tracker.get_state(session_id), turn=turn)
-intent = classify_intent(user_message, state)
-context = distill(tracker.get_transition_log(session_id), state)
+context = distill(tracker.get_history_summary(session_id), state)
 
-# ... your retrieval and rerank read state.to_dict(), context["short_term"], intent["intent"] ...
+# ... your retrieval and rerank read state.to_dict(), context["short_term"], state.intent ...
 
 tracker.record_ask(state, ask_attribute)
 tracker.record_recommendations(state, [r["parent_asin"] for r in recommendations])
@@ -278,8 +382,8 @@ print('usage:', drain_usage())
 Working output looks like this:
 
 ```text
-slots: {'category': ['hiking boots'], 'color': ['black'], 'budget': ['<=120'], 'feature': ['waterproof']}
-usage: {'prompt_tokens': 1226, 'completion_tokens': 406}
+slots: {'intent': 'Buying', 'category': ['hiking boots'], 'color': ['black'], 'budget': ['<=120'], 'feature': ['waterproof']}
+usage: {'prompt_tokens': 1470, 'completion_tokens': 340}
 ```
 
 With no key set you get one warning and `slots: {}`, which is the designed no-op.
@@ -312,19 +416,20 @@ guesses into the state.
 
 ### Cost, and the rate limit you will hit
 
-Measured on Groq free tier with `gpt-oss-120b`:
+Measured on Groq free tier with `gpt-oss-120b`. One joint `extract_slots` call
+does both jobs (slots and intent), so this is the entire per-turn cost:
 
 | Call | Prompt | Completion |
 | --- | --- | --- |
-| `extract_slots` | ~1220 | ~420 |
-| `classify_intent` | ~590 | ~205 |
-| **per turn** | **~2440 tokens** | |
+| `extract_slots` (slots + intent) | ~1470 | ~200-340 |
+| **per turn** | **~1700-1800 tokens** | |
 
-The free tier allows **8000 tokens per minute**, which is about **3.3 turns per
-minute**. A full 200 session run therefore takes hours. Develop against a subset
-or a local Ollama, and budget time for the full run.
+The free tier allows **8000 tokens per minute**, which is about **4.5 turns per
+minute** — better than the roughly 3.3 turns per minute two separate calls cost
+before this was merged. A full 200 session run still takes a while. Develop
+against a subset or a local Ollama, and budget time for the full run.
 
-`LLM_REASONING_EFFORT=low` drops this to about 1960 per turn, but it was measured
+`LLM_REASONING_EFFORT=low` cuts completion tokens further, but it was measured
 emitting `"< =120"` instead of `"<=120"`. `budget_bounds` tolerates the stray
 space now, but check quality before relying on low effort.
 
@@ -373,12 +478,12 @@ Every one of these works on a plain dict, so nothing needs to import
 | --- | --- | --- |
 | numeric filter | `budget_bounds(profile)` | `{"min_price", "max_price", "target_price"}`, floats or `None`. All `None` means no budget, so skip filtering. Decodes `"<=120"` so you never parse it. |
 | BM25 and dense | `state.query_terms()` | every positive value in one flat list |
-| RRF weighting | `classify_intent(...)["intent"]` | `"Buying"`, `"Browsing"`, or `None` |
+| RRF weighting | `state.intent` | `"Buying"`, `"Browsing"`, or `None` |
 | RRF on override | `state.conflicts_with_previous`, `context["short_term"]["focus_attributes"]` | that an override happened, and which slots changed |
 | negative filtering | `context["short_term"]["avoid"]` | rejected values with the slot each came from |
 | entropy questions | `state.missing_attributes()` | askable slots only, already excluding filled and permanently declined ones |
-| entropy weighting | `context["short_term"]["constraints"]` | confidence order |
-| entropy priors | `context["long_term"]["profile_corroboration"]` | tags split into `confirmed` and `unobserved` |
+| entropy priors | `context["session_summary"]["profile_corroboration"]` | tags split into `confirmed` and `unobserved` |
+| conflict resolution | `context["short_term"]["constraints"]` | `first_seen_turn`/`turns_held`/`revisions` per attribute, for when two stated constraints disagree |
 | reranker | `state.to_dict()` | the raw slots, or `context["short_term"]["digest"]` for a denser version |
 | agent skeleton | `record_ask`, `record_recommendations`, `drain_usage` | call all three at the end of each turn |
 
@@ -404,6 +509,7 @@ Entropy rules map onto what already exists:
 | `previous_top_10` | `list[str]` | what was shown last turn |
 | `previous_ask_attribute` | `str` | what was asked last turn, or `""` |
 | `conflicts_with_previous` | `bool` | this turn contradicted earlier state. Recomputed each turn, not sticky. |
+| `intent` | `str \| None` | `"Buying"` or `"Browsing"` for this turn, or `None` if unresolved. Recomputed each turn, not sticky. |
 
 Guarantees on `session_profile`:
 
@@ -433,8 +539,7 @@ Helpers: `state.filled_attributes()`, `state.missing_attributes()`,
   `"black cotton trim"`. Deliberate, so that retracting `"running"` clears
   `"women's running shoes"`, but it can over-reach.
 - **A pure refinement logs `no_change`.** The slot length does not grow, so no
-  `slot_filled:` reason appears. `distill()` still counts it in
-  `refinement_count`, but the log is not a complete record of value edits.
+  `slot_filled:` reason appears. The log is not a complete record of value edits.
 - `previous_top_10` is not cleared on an override, so items shown before a switch
   stay in the state.
 - No handling of "the second one". Nothing is saved to disk.
@@ -443,7 +548,7 @@ Helpers: `state.filled_attributes()`, `state.missing_attributes()`,
 
 ## Tests
 
-44 tests, no network and no credentials needed. The LLM transport is tested by
+46 tests, no network and no credentials needed. The LLM transport is tested by
 replacing `urllib.request.urlopen`, so the real request body and the real parsing
 path are both covered.
 
