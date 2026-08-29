@@ -76,14 +76,7 @@ class TemplateMessageBuilder:
 
 
 class LLMMessageBuilder:
-    """LLM phrasing from ``ask_attribute``, ``mode``, and the session state.
-
-    Doesn't reach into catalog/candidate metadata itself -- that's the
-    searcher's domain. If the searcher wants the message grounded in the
-    actual candidate spread for ``ask_attribute``, that's a signal it should
-    surface back through its own return value, not something this module
-    computes by inspecting products directly.
-    """
+    # LLM phrasing from ``ask_attribute``, ``mode``, and the session state.
 
     def __init__(self, client: Optional[object] = None, model: str = "claude-haiku-4-5") -> None:
         self._client = client
@@ -104,7 +97,14 @@ class LLMMessageBuilder:
         candidates: List[str],
     ) -> Tuple[str, Dict[str, int]]:
         client = self._get_client()
-        known = ", ".join(f"{key}={values}" for key, values in state.session_profile.items() if values)  # BOUNDARY(state): reads DialogueState.session_profile
+        # "rejected" is excluded: those are values the customer declined, not
+        # known preferences -- including it here previously presented a
+        # rejected value (and the raw "no_preference:<attr>" marker string)
+        # to the model as if it were a confirmed fact.
+        known = ", ".join(
+            f"{key}={values}" for key, values in state.session_profile.items()
+            if key != "rejected" and values
+        )  # BOUNDARY(state): reads DialogueState.session_profile
 
         if ask_attribute:
             instruction = f"Ask the customer about their {ask_attribute} preference in one short, natural sentence."

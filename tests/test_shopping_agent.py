@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from agent.intent_classifier import RegexIntentClassifier
-from agent.message_builder import TemplateMessageBuilder
+from agent.intent_classifier import LLMIntentClassifier, RegexIntentClassifier
+from agent.message_builder import LLMMessageBuilder, TemplateMessageBuilder
 from agent.shopping_agent import Agent
 from state.dialogue_state import DialogueState, DialogueStateTracker, empty_session_profile
 
@@ -132,6 +132,89 @@ class RegexIntentClassifierTests(unittest.TestCase):
         filled_state = DialogueState(session_profile={**empty_session_profile(), "category": ["boots"]})
         self.assertEqual(self.classifier.classify("hmm okay", filled_state), "buy")
         self.assertEqual(self.classifier.classify("hmm okay", self.empty_state), "browse")
+
+    def test_multi_digit_size_reads_as_buy(self) -> None:
+        # Regression: \d without + only matched a single digit, so "size 10"
+        # (and any two-digit size) silently failed to register as "buy".
+        self.assertEqual(self.classifier.classify("size 10 boots please", self.empty_state), "buy")
+
+    def test_bare_dollar_amount_reads_as_buy(self) -> None:
+        # Regression: \b immediately before "$" never holds in real text (a
+        # space or string-start precedes it, not a word character), so a
+        # bare "$80" -- without a leading "under" -- silently failed to match.
+        self.assertEqual(self.classifier.classify("$80 budget", self.empty_state), "buy")
+        self.assertEqual(self.classifier.classify("$8 budget", self.empty_state), "buy")
+
+    def test_requires_reads_as_buy(self) -> None:
+        # Regression: required? only matched "require"/"required", not "requires".
+        self.assertEqual(self.classifier.classify("It requires waterproofing", self.empty_state), "buy")
+
+    def test_maybe_no_longer_defeats_a_clear_buy_signal(self) -> None:
+        # Regression: "maybe" in _BROWSE_RE fired alongside "i need" in
+        # _BUY_RE, turning a clear buy message into a tie.
+        self.assertEqual(self.classifier.classify("Maybe I need a size 10 boot", self.empty_state), "buy")
+
+
+class _FakeUsage:
+    def __init__(self, input_tokens: int = 1, output_tokens: int = 1) -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class _FakeTextBlock:
+    def __init__(self, text: str) -> None:
+        self.type = "text"
+        self.text = text
+
+
+class _FakeMessagesAPI:
+    """Records the last call's kwargs; never touches the network."""
+
+    def __init__(self, reply_text: str) -> None:
+        self.reply_text = reply_text
+        self.last_kwargs: dict | None = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        return type("_FakeResponse", (), {"usage": _FakeUsage(), "content": [_FakeTextBlock(self.reply_text)]})()
+
+
+class _FakeAnthropicClient:
+    def __init__(self, reply_text: str = "buy") -> None:
+        self.messages = _FakeMessagesAPI(reply_text)
+
+
+def _rejected_state() -> DialogueState:
+    profile = empty_session_profile()
+    profile["color"] = ["black"]
+    profile["rejected"] = ["no_preference:material", "red"]
+    return DialogueState(session_profile=profile)
+
+
+class KnownContextExcludesRejectedTests(unittest.TestCase):
+    """Regression: the "known so far" summary sent to the LLM used to
+    include the "rejected" slot verbatim, presenting declined values (and
+    raw "no_preference:<attr>" marker strings) as if they were confirmed
+    preferences. Both LLM-backed pieces build this string; neither call
+    touches the network here (a fake client records what would be sent)."""
+
+    def test_intent_classifier_excludes_rejected(self) -> None:
+        client = _FakeAnthropicClient(reply_text="buy")
+        classifier = LLMIntentClassifier(client=client)
+        classifier.classify("anything", _rejected_state())
+        sent = client.messages.last_kwargs["messages"][0]["content"]
+        self.assertIn("color", sent)
+        self.assertNotIn("rejected", sent)
+        self.assertNotIn("no_preference", sent)
+
+    def test_message_builder_excludes_rejected(self) -> None:
+        client = _FakeAnthropicClient(reply_text="Do you have a color preference?")
+        builder = LLMMessageBuilder(client=client)
+        builder.build("color", "buy", _rejected_state(), ["A"])
+        sent = client.messages.last_kwargs["messages"][0]["content"]
+        self.assertIn("color", sent)
+        self.assertNotIn("rejected", sent)
+        self.assertNotIn("no_preference", sent)
 
 
 class TemplateMessageBuilderTests(unittest.TestCase):

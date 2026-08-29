@@ -10,10 +10,6 @@ developed and swapped independently:
   elsewhere (the ``Searcher`` protocol below), treated here as a black box;
 * message phrasing (``agent.message_builder``).
 
-See the plan doc for the design rationale and the flagged risks (most
-notably: the default wiring calls two LLMs per turn with no automatic
-fallback -- a documented, deliberate tradeoff, not an oversight).
-
 CROSS-BOUNDARY POINTS IN THIS FILE (everywhere this module reads from or
 calls into code owned by someone else -- marked inline as ``# BOUNDARY(...)``):
 
@@ -23,10 +19,6 @@ calls into code owned by someone else -- marked inline as ``# BOUNDARY(...)``):
   default construction of ``DialogueStateTracker()``, and every
   ``self.state_tracker.*`` call in ``respond()``.
 * ``BOUNDARY(search)`` -- the retrieval teammate's black box: the
-  ``Searcher`` protocol below (a *proposed* shape, not an agreed spec) and
-  the ``self.searcher.search(...)`` call in ``respond()``. No implementation
-  of this lives in this module -- ``searcher`` is a required constructor
-  argument with no default.
 """
 
 from __future__ import annotations

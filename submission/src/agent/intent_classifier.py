@@ -40,13 +40,21 @@ class IntentClassifier(Protocol):
 
 
 _BUY_RE = re.compile(
-    r"\b(i need|i want|looking for a|must have|has to (?:be|have)|required?|"
-    r"specifically|size \d|\$\d|under \$|budget of)\b",
+    r"\b(i need|i want|looking for a|must have|has to (?:be|have)|require[sd]?|"
+    r"specifically|size \d+|under \$|budget of)\b"
+    # Not wrapped in the leading \b above: "$" is a non-word character, so a
+    # boundary almost never holds immediately before it in real text ("$80"
+    # is preceded by a space or string-start, not a word char) -- \b\$\d+\b
+    # only ever matched contrived input glued to a word ("cost$8").
+    r"|\$\d+",
     re.IGNORECASE,
 )
 _BROWSE_RE = re.compile(
+    # "maybe" removed: it's too broad, and fires alongside a real buy signal
+    # ("Maybe I need a size 10 boot" matched both), turning a clear "buy"
+    # into a tie instead of reading it correctly.
     r"\b(just (?:looking|browsing)|not sure|still exploring|no rush|open to|"
-    r"any (?:ideas|suggestions)|thinking about|maybe|just curious)\b",
+    r"any (?:ideas|suggestions)|thinking about|just curious)\b",
     re.IGNORECASE,
 )
 
@@ -103,7 +111,14 @@ class LLMIntentClassifier:
 
     def classify(self, user_message: str, state: DialogueState) -> str:
         client = self._get_client()
-        known = ", ".join(f"{key}={values}" for key, values in state.session_profile.items() if values)  # BOUNDARY(state): reads DialogueState.session_profile
+        # "rejected" is excluded: those are values the customer declined, not
+        # known preferences -- including it here previously presented a
+        # rejected value (and the raw "no_preference:<attr>" marker string)
+        # to the model as if it were a confirmed fact.
+        known = ", ".join(
+            f"{key}={values}" for key, values in state.session_profile.items()
+            if key != "rejected" and values
+        )  # BOUNDARY(state): reads DialogueState.session_profile
         context = f"Known so far this session: {known}." if known else "Nothing disclosed yet this session."
         response = client.messages.create(  # BOUNDARY(external: Anthropic API) -- network call
             model=self.model,
