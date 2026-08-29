@@ -3,7 +3,6 @@ from __future__ import annotations
 import unittest
 
 from retrieval.catalog_ids import CatalogIndex
-from retrieval.category_filter import CategoryLookup
 from retrieval.pipeline import DEFAULT_ENTROPY_POOL_SIZE, DEFAULT_RERANKER_POOL_SIZE, Retriever
 
 
@@ -85,46 +84,32 @@ class RetrieverTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             retriever.retrieve("query", mode="not_a_real_mode")
 
-    def test_no_message_means_unscoped_search(self) -> None:
+    def test_no_failed_asins_means_unscoped_search(self) -> None:
         bm25 = FakeRoute([("a", 1.0)])
-        lookup = CategoryLookup({"a": {"shoes"}, "b": {"dresses"}})
-        retriever = Retriever(
-            bm25=bm25, dense=FakeRoute([]), catalog_index=self.catalog_index, category_lookup=lookup
-        )
-        retriever.retrieve("query", mode="buying")  # message=None by default
+        retriever = Retriever(bm25=bm25, dense=FakeRoute([]), catalog_index=self.catalog_index)
+        retriever.retrieve("query", mode="buying")  # failed_asins=None by default
         self.assertEqual(bm25.seen_candidate_ids, [None])
 
-    def test_recognized_category_message_restricts_both_routes(self) -> None:
-        bm25 = FakeRoute([("a", 1.0), ("b", 0.5)])
-        dense = FakeRoute([("a", 1.0), ("b", 0.5)])
-        lookup = CategoryLookup({"a": {"shoes", "running"}, "b": {"dresses"}})
-        retriever = Retriever(
-            bm25=bm25, dense=dense, catalog_index=self.catalog_index, category_lookup=lookup
-        )
-        result = retriever.retrieve(
-            "query", mode="buying", message="I'm looking for running shoes, but I'm still exploring."
-        )
-        self.assertEqual([r["parent_asin"] for r in result.entropy_pool], ["a"])
+    def test_empty_failed_asins_list_means_unscoped_search(self) -> None:
+        bm25 = FakeRoute([("a", 1.0)])
+        retriever = Retriever(bm25=bm25, dense=FakeRoute([]), catalog_index=self.catalog_index)
+        retriever.retrieve("query", mode="buying", failed_asins=[])
+        self.assertEqual(bm25.seen_candidate_ids, [None])
 
-    def test_unrecognized_message_shape_is_unscoped(self) -> None:
-        bm25 = FakeRoute([("a", 1.0), ("b", 0.5)])
-        lookup = CategoryLookup({"a": {"shoes"}, "b": {"dresses"}})
-        retriever = Retriever(
-            bm25=bm25, dense=FakeRoute([]), catalog_index=self.catalog_index, category_lookup=lookup
-        )
-        message = "im looking for something to buy since im going to a party. im just browsing. help me find something"
-        result = retriever.retrieve("query", mode="buying", message=message)
-        self.assertEqual({r["parent_asin"] for r in result.entropy_pool}, {"a", "b"})
+    def test_failed_asins_excludes_products_from_both_routes(self) -> None:
+        bm25 = FakeRoute([("a", 1.0), ("b", 0.5), ("c", 0.4)])
+        dense = FakeRoute([("a", 1.0), ("b", 0.5), ("c", 0.4)])
+        retriever = Retriever(bm25=bm25, dense=dense, catalog_index=self.catalog_index)
+        result = retriever.retrieve("query", mode="buying", failed_asins=["b"])
+        self.assertEqual({r["parent_asin"] for r in result.entropy_pool}, {"a", "c"})
+        # both routes received "catalog minus b", not just bm25
+        self.assertEqual(bm25.seen_candidate_ids[0], {"a", "c", "d", "e"})
 
-    def test_dense_route_overfetches_and_filters_when_category_active(self) -> None:
+    def test_dense_route_overfetches_and_filters_when_asins_excluded(self) -> None:
         dense = FakeRoute([("a", 1.0), ("b", 0.9), ("c", 0.8)])
-        lookup = CategoryLookup({"a": {"shoes"}, "b": {"shoes"}, "c": {"dresses"}})
-        retriever = Retriever(
-            bm25=FakeRoute([]), dense=dense, catalog_index=self.catalog_index, category_lookup=lookup
-        )
+        retriever = Retriever(bm25=FakeRoute([]), dense=dense, catalog_index=self.catalog_index)
         result = retriever.retrieve(
-            "query", mode="buying", message="I'm looking for shoes, but I'm still exploring.",
-            entropy_pool_size=2, reranker_pool_size=2,
+            "query", mode="buying", failed_asins=["c"], entropy_pool_size=2, reranker_pool_size=2,
         )
         # dense.search was asked for MORE than 2 (overfetch), not exactly 2 --
         # candidate_ids isn't passed to the dense route's own search() call.

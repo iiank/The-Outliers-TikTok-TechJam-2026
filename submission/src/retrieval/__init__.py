@@ -1,13 +1,12 @@
-"""Retrieval: keyword (BM25) + dense routes, fused via mode-weighted RRF, behind a coarse-category pre-filter.
+"""Retrieval: keyword (BM25) + dense routes, fused via mode-weighted RRF, behind search.py's hard-filter exclusions.
 
-    from retrieval import BM25Index, CatalogIndex, CategoryLookup, Retriever, RetrievalResult
+    from retrieval import BM25Index, CatalogIndex, Retriever, RetrievalResult
 """
 
 from __future__ import annotations
 
 from .bm25 import BM25Index
 from .catalog_ids import CatalogIndex
-from .category_filter import CategoryLookup, extract_coarse_category
 from .pipeline import RetrievalResult, Retriever
 from .rrf import (
     BROWSING_WEIGHTS,
@@ -22,8 +21,6 @@ __all__ = [
     "BROWSING_WEIGHTS",
     "BUYING_WEIGHTS",
     "CatalogIndex",
-    "CategoryLookup",
-    "extract_coarse_category",
     "ROUTE_ORDER",
     "RetrievalResult",
     "Retriever",
