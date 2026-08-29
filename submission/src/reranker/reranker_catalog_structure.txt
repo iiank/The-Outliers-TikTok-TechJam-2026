@@ -6,6 +6,7 @@
         leaf_categories=leaf_categories,
         top_features=top_features
     ),
-    "price": price,
-    "average_rating": avg_rating
+    "price": float,
+    "catagory": List[str]
+    "average_rating": float
 }

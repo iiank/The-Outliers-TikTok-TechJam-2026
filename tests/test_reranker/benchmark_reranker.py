@@ -14,13 +14,13 @@ if str(ROOT_DIR) not in sys.path:
     
 CATALOG_PATH = ROOT_DIR / "submission" / "src" / "reranker" / "reranker_catalog.jsonl"
 
-from submission.src.reranker.reranker import ProductReranker, build_reranker_query, load_catalog
+from submission.src.reranker.reranker import Reranker, build_reranker_query, load_reranker_catalog
 
 
 def benchmark_reranker_latency(num_candidates: int = 100, num_runs: int = 50):
     print(f"\n{'='*20} 1. COMPONENT LATENCY BENCHMARK ({num_candidates} Candidates) {'='*20}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    reranker = ProductReranker(device=device, batch_size=64, use_fp16=True)
+    reranker = Reranker(device=device, batch_size=64, use_fp16=True)
 
     state = {
         "session_profile": {
@@ -107,7 +107,7 @@ def benchmark_catalog_cold_start(catalog_path: Path = CATALOG_PATH, catalog_size
     tmp_path = "submission/src/reranker/reranker_catalog.jsonl"
 
     t0 = time.perf_counter()
-    catalog = load_catalog(str(catalog_path))
+    catalog = load_reranker_catalog(str(catalog_path))
     load_duration = (time.perf_counter() - t0) * 1000
 
     file_size_mb = os.path.getsize(tmp_path) / (1024 * 1024)
@@ -157,7 +157,7 @@ def benchmark_reranker_pipeline():
     }
     
     # 2. Load catalog
-    catalog = load_catalog(str(CATALOG_PATH))
+    catalog = load_reranker_catalog(str(CATALOG_PATH))
     catalog_items = list(catalog.items()) if isinstance(catalog, dict) else list(catalog)
 
     # 3. Extract top 100 candidate items (indices: 27640 < i <= 27740 -> slice [27641:27741])
@@ -166,7 +166,7 @@ def benchmark_reranker_pipeline():
     
     # 4. Initialize and run Reranker
     t_init_0 = time.perf_counter()
-    reranker = ProductReranker()
+    reranker = Reranker()
     init_duration = (time.perf_counter() - t_init_0) * 1000
 
     t_rerank_0 = time.perf_counter()
