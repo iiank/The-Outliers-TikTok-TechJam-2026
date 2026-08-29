@@ -49,6 +49,56 @@ class BM25IndexTests(unittest.TestCase):
             index = BM25Index(catalog_path)
             self.assertEqual(len(index.search("running shoe", top_k=2)), 2)
 
+    def test_candidate_ids_restricts_results(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = _write_catalog(Path(directory), [
+                {"parent_asin": "A", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+                {"parent_asin": "B", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+                {"parent_asin": "C", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+            ])
+            index = BM25Index(catalog_path)
+            results = index.search("running shoe", top_k=10, candidate_ids={"A", "C"})
+            self.assertEqual({doc_id for doc_id, _ in results}, {"A", "C"})
+
+    def test_empty_candidate_ids_returns_empty_not_unscoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = _write_catalog(Path(directory), [
+                {"parent_asin": "A", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+            ])
+            index = BM25Index(catalog_path)
+            self.assertEqual(index.search("running shoe", top_k=10, candidate_ids=set()), [])
+
+    def test_none_candidate_ids_is_unscoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = _write_catalog(Path(directory), [
+                {"parent_asin": "A", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+                {"parent_asin": "B", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+            ])
+            index = BM25Index(catalog_path)
+            results = index.search("running shoe", top_k=10, candidate_ids=None)
+            self.assertEqual({doc_id for doc_id, _ in results}, {"A", "B"})
+
+    def test_repeated_searches_with_different_candidate_ids_dont_leak(self) -> None:
+        # The temp table is reused across calls -- make sure DELETE really
+        # clears it rather than accumulating candidates from prior calls.
+        with tempfile.TemporaryDirectory() as directory:
+            catalog_path = _write_catalog(Path(directory), [
+                {"parent_asin": "A", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+                {"parent_asin": "B", "title": "running shoe", "categories": [], "features": [],
+                 "details": {}, "store": "Acme", "description": []},
+            ])
+            index = BM25Index(catalog_path)
+            index.search("running shoe", top_k=10, candidate_ids={"A"})
+            second = index.search("running shoe", top_k=10, candidate_ids={"B"})
+            self.assertEqual({doc_id for doc_id, _ in second}, {"B"})
+
     def test_higher_score_is_better(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             catalog_path = _write_catalog(Path(directory), [
