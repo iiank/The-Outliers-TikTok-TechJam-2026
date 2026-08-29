@@ -2,9 +2,12 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Set, Union, Sequence, Tuple
 import logging
 
-from src.generation.weighted_entropy import WeightedEntropy
-from src.reranker.reranker import Reranker, load_reranker_catalog
-from src.retrieval.pipeline import Retriever
+from generation.weighted_entropy import WeightedEntropy
+from reranker.reranker import Reranker, load_reranker_catalog
+from retrieval.bm25 import BM25Index
+from retrieval.catalog_ids import CatalogIndex
+from retrieval.pipeline import Retriever
+from embed.store import load_store
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +159,16 @@ def _to_dict(state: Any) -> Dict[str, Any]:
         return state.__dict__
     return dict(state)
 
+
+def build_retrieval_query(state_dict: Dict[str, Any]) -> str:
+    """Flattens session_profile's disclosed values into a plain search string."""
+    session_profile = state_dict.get("session_profile", {})
+    terms: List[str] = []
+    for values in session_profile.values():
+        terms.extend(v for v in values if v)
+    return " ".join(terms)
+
+
 class SearchPipeline:
     """Encompasses catalog, retriever, reranker, and entropy modules."""
 
@@ -166,16 +179,30 @@ class SearchPipeline:
         entropy_gen: Optional[WeightedEntropy] = None,
         catalog: Optional[List[Dict[str, Any]]] = None,
     ):
-        self.catalog: List[Dict[str, Any]] = catalog if catalog is not None else load_reranker_catalog()
-        self.retriever: Retriever = retriever or Retriever()
+        # CatalogIndex (data/catalog.jsonl) is the one shared parent_asin
+        # <-> index mapping. self.catalog's row order is built *from* it
+        # (looked up by parent_asin, never trusted positionally), so
+        # catalog_index.index_of(asin) and self.catalog[idx] agree by
+        # construction, regardless of reranker_catalog.jsonl's own on-disk
+        # order. Raises KeyError at startup if any catalog.jsonl asin is
+        # missing from reranker_catalog.jsonl, instead of silently
+        # misaligning indices later.
+        self.catalog_index = CatalogIndex.load("data/catalog.jsonl")
+
+        if catalog is not None:
+            self.catalog: List[Dict[str, Any]] = catalog
+        else:
+            _by_asin = {row["parent_asin"]: row for row in load_reranker_catalog()}
+            self.catalog = [_by_asin[asin] for asin in self.catalog_index.ids]
+
+        if retriever is None:
+            bm25 = BM25Index("data/catalog.jsonl")
+            dense = load_store()
+            retriever = Retriever(bm25=bm25, dense=dense, catalog_index=self.catalog_index)
+        self.retriever: Retriever = retriever
+
         self.reranker: Reranker = reranker or Reranker()
         self.entropy_gen: WeightedEntropy = entropy_gen or WeightedEntropy()
-
-        # Build index-to-ASIN and ASIN-to-index maps for O(1) lookups
-        # NOTE: INDEX/ASIN MAPPING HERE!!!
-        self.idx_to_asin: Dict[int, str] = {
-            i: item.get("parent_asin", "") for i, item in enumerate(self.catalog)
-        }
 
     def search(self, state: Any) -> Tuple[List[str], str]:
         """
@@ -194,14 +221,18 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 2. Hybrid Retrieval (Pre-filtered candidate pool -> BM25 + Dense -> RRF)
         # ---------------------------------------------------------------------
-        intent_mode = state_dict.get("intent") or "buying"
+        # Browsing, not buying, is the default -- matches
+        # buying-browsing-pipeline-spec.md, which specifies browsing as
+        # the default until a hard constraint is disclosed.
+        intent_mode = state_dict.get("intent") or "browsing"
         if intent_mode not in ("buying", "browsing"):
-            intent_mode = "buying"
+            intent_mode = "browsing"
+
+        query_terms = build_retrieval_query(state_dict)
 
         retrieval_result = self.retriever.retrieve(
-            state_dict=state_dict,
+            query_terms=query_terms,
             mode=intent_mode,
-            message=None,
             entropy_pool_size=500,
             reranker_pool_size=100,
             failed_asins=failed_asins,

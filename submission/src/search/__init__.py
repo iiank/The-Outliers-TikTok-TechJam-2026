@@ -3,7 +3,7 @@ Search package initialization.
 Exposes the overarching search API, SearchPipeline, hard filters, and query builders.
 """
 
-from src.search.search import (
+from .search import (
     ALLOWED_ATTRIBUTES,
     SearchPipeline,
     get_failed_hard_filter_asins,
