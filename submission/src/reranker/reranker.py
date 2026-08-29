@@ -11,6 +11,7 @@ RERANKER_CATALOG_LEN = 50000
 def build_reranker_query(state: Dict[str, Any]) -> str:
     """
     Parses DialogueState into a compact, high-density query string for MS MARCO.
+    Note Reranker takes the whole state as-is defined in the README_dialogue_state.md
     """
     session_profile = state.get("session_profile", {})
     user_profile = state.get("user_profile", {})
