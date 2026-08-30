@@ -1,7 +1,8 @@
 """Wires the BM25 and dense routes together through weighted RRF.
 
-``Retriever.retrieve(query_terms, mode, message=None)`` is the single
-entry point. Per the team's Aug 2026 build brief:
+``Retriever.retrieve(query_terms, mode, failed_asins=None)`` is the single
+entry point. Per the team's Aug 2026 build brief (and the retrieval +
+search integration fixes that followed it):
 
 * Task 1 -- fusion is weighted differently for ``"buying"`` vs
   ``"browsing"`` (see ``retrieval.rrf.weights_for_mode``).
@@ -9,9 +10,15 @@ entry point. Per the team's Aug 2026 build brief:
   the entropy/ask-attribute policy, and a top-100 ``(catalog_index,
   rrf_score)`` pool for the reranker. Both are prefixes of the same fused
   list, not two separate retrieval passes.
-* Task 3 -- when a coarse category is extractable from ``message``, both
-  routes search only within matching products, applied identically to
-  both modes.
+* Hard filtering (category + budget) is owned entirely by
+  ``search.py``'s ``get_failed_hard_filter_asins()``, which reads
+  ``state["session_profile"]`` and returns ``parent_asin``s to exclude.
+  This module's only job is to turn that exclusion list into the same
+  kind of ``candidate_ids`` set both routes already know how to search
+  within -- "catalog minus excluded" instead of a positive match set.
+  (The turn-1-message category pre-filter that used to live here, in
+  ``retrieval.category_filter``, has been removed as redundant with
+  ``search.py``'s session-state-based filter.)
 """
 
 from __future__ import annotations
@@ -20,7 +27,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 from .bm25 import BM25Index
-from .category_filter import CategoryLookup, extract_coarse_category
 from .catalog_ids import CatalogIndex
 from .rrf import ROUTE_ORDER, reciprocal_rank_fusion, weights_for_mode
 
@@ -32,13 +38,13 @@ DEFAULT_ENTROPY_POOL_SIZE = 500
 DEFAULT_RERANKER_POOL_SIZE = 100
 
 #: How much deeper to query the dense route than the target pool size
-#: when a category filter is active, to compensate for the overfetch+
-#: filter-in-Python approach (see module docstring / build discussion):
-#: VectorStore.search() has no candidate-ID parameter, so restricting it
-#: to a category means asking for more than needed, then discarding
-#: anything outside the allowed set. A rare category can still come back
-#: short of the target pool size -- that's a known, accepted limit of
-#: this approach, not a bug.
+#: whenever a hard filter has excluded any candidates, to compensate for
+#: the overfetch+filter-in-Python approach (see module docstring / build
+#: discussion): VectorStore.search() has no candidate-ID parameter, so
+#: restricting it means asking for more than needed, then discarding
+#: anything outside the allowed set. A heavily-filtered turn can still
+#: come back short of the target pool size -- that's a known, accepted
+#: limit of this approach, not a bug.
 _DENSE_OVERFETCH_MULTIPLIER = 5
 
 
@@ -49,6 +55,8 @@ class DenseRoute(Protocol):
     :meth:`BM25Index.search`, the dense route is never asked to filter
     itself; :meth:`Retriever._search_dense` overfetches and filters in
     Python instead, so this module never needs to touch ``embed/store.py``.
+    Works the same way regardless of whether the candidate set came from
+    a positive category match or (now) a hard-filter exclusion list.
     """
 
     def search(self, query: str, top_k: int) -> Sequence[Tuple[str, float]]: ...
@@ -78,40 +86,38 @@ class RetrievalResult:
 
 @dataclass
 class Retriever:
-    """Fuses BM25 + dense via mode-weighted RRF, behind a shared category pre-filter."""
+    """Fuses BM25 + dense via mode-weighted RRF, behind search.py's hard-filter exclusions."""
 
     bm25: BM25Index
     dense: DenseRoute
     catalog_index: CatalogIndex
-    category_lookup: Optional[CategoryLookup] = None
     rrf_k: int = 60
 
     def retrieve(
         self,
         query_terms: str,
         mode: str,
-        message: Optional[str] = None,
         entropy_pool_size: int = DEFAULT_ENTROPY_POOL_SIZE,
         reranker_pool_size: int = DEFAULT_RERANKER_POOL_SIZE,
+        failed_asins: Optional[Sequence[str]] = None,
     ) -> RetrievalResult:
-        """Run the full Task 1 + 2 + 3 pipeline for one turn.
+        """Run the full retrieval + fusion pipeline for one turn.
 
         ``query_terms`` is what both routes search with -- building it
         from the conversation's accumulated state (vs. just this turn's
         raw text) is the caller's responsibility, not this module's.
 
-        ``message`` is the raw customer message, used only for Task 3's
-        coarse-category extraction (a template match against message
-        *shape*, which ``query_terms`` -- already reduced to keywords --
-        can't support). Pass ``None`` to skip category extraction
-        entirely (equivalent to a message that doesn't match any
-        template): both routes then search unscoped.
+        ``failed_asins``, if given, is a list of ``parent_asin``s to
+        exclude before either route searches -- typically
+        ``search.get_failed_hard_filter_asins()``'s output (category +
+        budget hard constraints). Pass ``None`` or ``[]`` for no
+        exclusions: both routes then search the full catalog.
 
         ``mode`` must be ``"buying"`` or ``"browsing"`` -- see
         ``retrieval.rrf.weights_for_mode``.
         """
         pool_size = max(entropy_pool_size, reranker_pool_size)
-        candidate_ids = self._resolve_candidate_ids(message)
+        candidate_ids = self._resolve_candidate_ids(failed_asins)
 
         bm25_ranking = self.bm25.search(query_terms, pool_size, candidate_ids=candidate_ids)
         dense_ranking = self._search_dense(query_terms, pool_size, candidate_ids)
@@ -136,21 +142,17 @@ class Retriever:
 
         return RetrievalResult(entropy_pool=entropy_pool, reranker_pool=reranker_pool)
 
-    def _resolve_candidate_ids(self, message: Optional[str]) -> Optional[Set[str]]:
-        """Task 3: category phrase -> allowed-ID set, or ``None`` (unscoped).
+    def _resolve_candidate_ids(self, failed_asins: Optional[Sequence[str]]) -> Optional[Set[str]]:
+        """``failed_asins`` -> allowed-ID set (catalog minus excluded), or ``None`` (unscoped).
 
-        Returns ``None`` -- not an empty set -- whenever the filter
-        shouldn't apply at all: no message, no template match, or no
-        ``CategoryLookup`` configured. ``None`` means "both routes search
-        the full catalog"; an empty set would incorrectly mean "nothing
-        matches anything."
+        ``None`` -- not an empty set -- whenever there's nothing to
+        exclude, so both routes take the cheap unscoped path instead of
+        needlessly restricting to "everything."
         """
-        if message is None or self.category_lookup is None:
+        if not failed_asins:
             return None
-        category = extract_coarse_category(message)
-        if category is None:
-            return None
-        return self.category_lookup.matching_ids(category)
+        excluded = set(failed_asins)
+        return {asin for asin in self.catalog_index.ids if asin not in excluded}
 
     def _search_dense(
         self,
