@@ -54,7 +54,7 @@ class SelectGateWiringTests(unittest.TestCase):
                 return None, []
 
         pipeline = _make_pipeline(_EntropyGen())
-        _, attr = pipeline.search({"session_profile": {}, "turn": 2})
+        _, attr, _diagnostics = pipeline.search({"session_profile": {}, "turn": 2})
         self.assertIsNone(attr)
 
     def test_exception_falls_back_to_heuristic(self) -> None:
@@ -63,7 +63,7 @@ class SelectGateWiringTests(unittest.TestCase):
                 raise RuntimeError("boom")
 
         pipeline = _make_pipeline(_EntropyGen())
-        _, attr = pipeline.search({"session_profile": {}, "turn": 2})
+        _, attr, _diagnostics = pipeline.search({"session_profile": {}, "turn": 2})
         self.assertTrue(attr in search_mod.DEFAULT_ATTRIBUTE_PRIORITY or attr == "feature")
 
     def test_out_of_enum_attribute_falls_back_to_heuristic(self) -> None:
@@ -72,7 +72,7 @@ class SelectGateWiringTests(unittest.TestCase):
                 return "not_a_real_attribute", []
 
         pipeline = _make_pipeline(_EntropyGen())
-        _, attr = pipeline.search({"session_profile": {}, "turn": 2})
+        _, attr, _diagnostics = pipeline.search({"session_profile": {}, "turn": 2})
         self.assertTrue(attr in search_mod.DEFAULT_ATTRIBUTE_PRIORITY or attr == "feature")
 
     def test_heuristic_fallback_skips_already_filled_attributes(self) -> None:
@@ -82,7 +82,7 @@ class SelectGateWiringTests(unittest.TestCase):
 
         pipeline = _make_pipeline(_EntropyGen())
         filled = {attr: ["x"] for attr in search_mod.DEFAULT_ATTRIBUTE_PRIORITY[:-1]}
-        _, attr = pipeline.search({"session_profile": filled, "turn": 2})
+        _, attr, _diagnostics = pipeline.search({"session_profile": filled, "turn": 2})
         self.assertEqual(attr, search_mod.DEFAULT_ATTRIBUTE_PRIORITY[-1])
 
 
