@@ -7,9 +7,7 @@ from reranker.reranker import Reranker, load_reranker_catalog
 from retrieval.bm25 import BM25Index
 from retrieval.catalog_ids import CatalogIndex
 from retrieval.pipeline import Retriever
-from retrieval.price_scoring import apply_target_price_scoring
 from embed.store import load_store
-from state.dialogue_state import budget_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -165,12 +163,6 @@ class SearchPipeline:
         failed_asins: List[str] = get_failed_hard_filter_asins(state_dict, self.catalog)
         num_failed_asins = len(failed_asins)
         diagnostics["hard_filters_dropped"] = num_failed_asins
-        diagnostics["retrieval_counts"] = {
-            "pre_filtered_pool": 50000 - num_failed_asins,
-            "bm25_top": 50,
-            "dense_top": 50,
-            "rrf_pool": 100
-        }
 
         # ---------------------------------------------------------------------
         # 2. Hybrid Retrieval (Pre-filtered candidate pool -> BM25 + Dense -> RRF)
@@ -181,13 +173,36 @@ class SearchPipeline:
 
         query_terms = build_retrieval_query(state_dict)
 
+        # Named once, reused for both the retrieve() call and the diagnostics
+        # below -- keeps the two from silently drifting apart the way the old
+        # hardcoded 50/50/100 diagnostics values had already drifted from the
+        # real 500/500/100 retrieve() actually uses (retrieval.pipeline
+        # queries both routes at max(entropy_pool_size, reranker_pool_size)).
+        entropy_pool_size = 500
+        reranker_pool_size = 100
+        route_query_depth = max(entropy_pool_size, reranker_pool_size)
+
         retrieval_result = self.retriever.retrieve(
             query_terms=query_terms,
             mode=intent_mode,
-            entropy_pool_size=500,
-            reranker_pool_size=100,
+            entropy_pool_size=entropy_pool_size,
+            reranker_pool_size=reranker_pool_size,
             failed_asins=failed_asins,
         )
+
+        # bm25_top/dense_top are what was *requested* from each route (both
+        # routes are queried at the same depth -- see pipeline.Retriever.
+        # retrieve()), not necessarily what came back; RetrievalResult
+        # doesn't expose each route's raw count separately. rrf_pool *is*
+        # the true post-fusion count, since retrieval_result has it -- can
+        # be less than reranker_pool_size if fewer candidates survived
+        # filtering than that.
+        diagnostics["retrieval_counts"] = {
+            "pre_filtered_pool": len(self.catalog) - num_failed_asins,
+            "bm25_top": route_query_depth,
+            "dense_top": route_query_depth,
+            "rrf_pool": len(retrieval_result.reranker_pool),
+        }
 
         # ---------------------------------------------------------------------
         # 3. Candidate Index Extraction
@@ -201,35 +216,27 @@ class SearchPipeline:
                 entropy_indices.append(idx)
 
         # ---------------------------------------------------------------------
-        # 4. Cross-Encoder Reranking -> Target-Price Scoring -> Top 10
+        # 4. Cross-Encoder Reranking -> Top 10 Recommendations
         # ---------------------------------------------------------------------
-        # Reranked at the full candidate-pool width, not just 10: target-price
-        # scoring (below) needs room to move a candidate up from outside the
-        # cutoff, which it can't do if the list is already truncated to 10.
+        # Target-price scoring (target-price-scoring-spec.md) happens inside
+        # rank_from_state()/rank() now, not here -- it pulls target_price out
+        # of state itself and factors it into the score before the internal
+        # top_k cut, so the reranker's own top_k is the final desired count.
         reranked_docs = self.reranker.rank_from_state(
             state=state_dict,
             candidate_indices=reranker_indices,
             catalog=self.catalog,
-            top_k=len(reranker_indices),
+            top_k=10,
         )
-
-        # Soft price adjustment (target-price-scoring-spec.md), never a hard
-        # filter -- multiplies each candidate's rerank score by a
-        # closeness-to-target factor, then re-sorts. A no-op when the
-        # customer hasn't stated a target price this turn.
-        target_price = budget_bounds(session_profile).get("target_price")
-        price_scored_docs = apply_target_price_scoring(reranked_docs, target_price=target_price)
-
         top_10_asins = [
-            doc["parent_asin"] for doc in price_scored_docs[:10] if "parent_asin" in doc
+            doc["parent_asin"] for doc in reranked_docs if "parent_asin" in doc
         ]
-        # NOTE: might need to amend this list based on whether the price scoring stays
         # NOTE: need to get the doc title
         diagnostics["top_candidates_ce"] = [
             {
-                "asin": doc["parent_asin"],
-                "score": doc["score"],
-                "title": doc.get("title", "")
+                "asin": doc.get("parent_asin", ""),
+                "score": doc.get("score"),
+                "title": doc.get("title", ""),
             }
             for doc in reranked_docs[:5]
         ]
