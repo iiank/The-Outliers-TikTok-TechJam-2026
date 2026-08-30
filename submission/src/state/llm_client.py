@@ -72,9 +72,7 @@ from typing import Any, Dict, Iterable, List, Optional
 __all__ = [
     "LLMResult",
     "call_json",
-    "credentials_present",
     "drain_usage",
-    "usage_totals",
     "reset_usage",
     "string_array",
 ]
@@ -165,10 +163,6 @@ class _UsageMeter:
             self._completion = 0
         return totals
 
-    def totals(self) -> Dict[str, int]:
-        with self._lock:
-            return {"prompt_tokens": self._prompt, "completion_tokens": self._completion}
-
 
 _METER = _UsageMeter()
 
@@ -181,11 +175,6 @@ def drain_usage() -> Dict[str, int]:
     ``usage`` sub-schema in docs/agent_api_contract.json as-is.
     """
     return _METER.drain()
-
-
-def usage_totals() -> Dict[str, int]:
-    """Peek at the undrained counter without resetting it."""
-    return _METER.totals()
 
 
 def reset_usage() -> None:
@@ -226,15 +215,6 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ[name])
     except (KeyError, TypeError, ValueError):
         return default
-
-
-def credentials_present() -> bool:
-    """True when ``LLM_API_KEY`` is set to something non-empty.
-
-    Cheap enough to call per turn, and lets a caller skip building a prompt it
-    cannot send.
-    """
-    return bool(os.environ.get("LLM_API_KEY", "").strip())
 
 
 # --------------------------------------------------------------------------

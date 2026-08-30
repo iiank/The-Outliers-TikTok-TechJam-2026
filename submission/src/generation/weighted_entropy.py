@@ -31,6 +31,7 @@ __all__ = [
     "WeightedEntropy",
     "MAX_TAG_WEIGHT",
     "FEATURE_SCORE",
+    "HARD_REFUSAL_LIMIT",
     "MIN_SCORE",
     "TAG_AFFINITY",
     "TAG_STRENGTH",
@@ -102,6 +103,14 @@ IDEAL_VALUE_COUNT = 12.0
 FEATURE_SCORE = 0.30
 MIN_SCORE = 0.0
 _REFUSAL_DECAY = 0.55
+
+#: Consecutive refusals before an attribute is fully excluded rather than
+#: merely decayed. ``AskState.penalty()`` alone only shrinks a score toward
+#: zero and never reaches it (``MIN_SCORE`` defaults to ``0.0``), so without
+#: this cutoff a chronically-ignored attribute keeps being offered forever,
+#: just at a lower score. Placeholder value pending eval-driven tuning, same
+#: status as the untuned RRF weights in retrieval/rrf.py.
+HARD_REFUSAL_LIMIT = 2
 
 
 def _text(value: object) -> str:
@@ -230,6 +239,9 @@ def ask_state_from_profile(
     asked = (previous_ask_attribute or "").strip()
     if asked and asked in ASKABLE_ATTRIBUTES and asked not in confirmed and asked not in banned:
         counts[asked] = counts.get(asked, 0) + 1
+
+    fatigued = {attr for attr, n in counts.items() if n >= HARD_REFUSAL_LIMIT}
+    banned = banned | (fatigued & set(ASKABLE_ATTRIBUTES))
 
     return AskState(confirmed=confirmed, banned=banned, refusals=counts)
 

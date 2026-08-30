@@ -1,14 +1,3 @@
-"""Workflow tests for the state package.
-
-Run with the submission source on the path, like the other suites here:
-
-    PYTHONPATH=submission/src python3 -m unittest discover -s tests -v
-
-No network and no credentials. The LLM transport is exercised by replacing
-``urllib.request.urlopen``, so the real request body and the real parsing path
-are both covered without spending tokens.
-"""
-
 from __future__ import annotations
 
 import io
@@ -155,17 +144,17 @@ class TrackerTests(unittest.TestCase):
             DialogueStateTracker().get_state("never-reset")
 
     def test_intent_resets_to_none_when_extraction_fails(self) -> None:
-        tracker = DialogueStateTracker(extractor=scripted({1: {"category": ["boots"], "intent": "Buying"}}))
+        tracker = DialogueStateTracker(extractor=scripted({1: {"category": ["boots"], "intent": "buying"}}))
         state = tracker.update("m", tracker.reset("s", {}), turn=1)
-        self.assertEqual(state.intent, "Buying")
+        self.assertEqual(state.intent, "buying")
         tracker_no_signal = DialogueStateTracker(extractor=scripted({}))
         failed = tracker_no_signal.update("m", tracker_no_signal.reset("s", {}), turn=1)
         self.assertIsNone(failed.intent)
 
     def test_intent_is_not_a_slot(self) -> None:
-        tracker = DialogueStateTracker(extractor=scripted({1: {"intent": "Browsing"}}))
+        tracker = DialogueStateTracker(extractor=scripted({1: {"intent": "browsing"}}))
         state = tracker.update("m", tracker.reset("s", {}), turn=1)
-        self.assertEqual(state.intent, "Browsing")
+        self.assertEqual(state.intent, "browsing")
         self.assertNotIn("intent", state.session_profile)
 
     def test_no_text_matching_against_the_message(self) -> None:
@@ -178,6 +167,46 @@ class TrackerTests(unittest.TestCase):
             results.append(state.to_dict()["session_profile"])
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[1], results[2])
+
+    def test_unanswered_ask_attribute_accumulates_refusal_count(self) -> None:
+        # Pillar III, adaptive orchestration: the entropy module reads
+        # state["attribute_refusals"] to decay/exclude a repeatedly-ignored
+        # question, but it can only ever see a real running count if the
+        # tracker actually persists one turn to turn.
+        tracker = DialogueStateTracker(extractor=scripted({}))
+        state = tracker.reset("s", {})
+        for turn in (1, 2, 3):
+            state = tracker.record_ask(state, "material")
+            state = tracker.update("nothing relevant", state, turn=turn)
+        self.assertEqual(state.attribute_refusals.get("material"), 3)
+
+    def test_answering_the_asked_attribute_clears_its_refusal_count(self) -> None:
+        tracker = DialogueStateTracker(extractor=scripted({2: {"material": ["cotton"]}}))
+        state = tracker.reset("s", {})
+        state = tracker.record_ask(state, "material")
+        state = tracker.update("no idea", state, turn=1)
+        self.assertEqual(state.attribute_refusals.get("material"), 1)
+        state = tracker.record_ask(state, "material")
+        state = tracker.update("cotton please", state, turn=2)
+        self.assertNotIn("material", state.attribute_refusals)
+
+    def test_declining_the_asked_attribute_clears_its_refusal_count(self) -> None:
+        tracker = DialogueStateTracker(extractor=scripted({2: {"no_preference": ["material"]}}))
+        state = tracker.reset("s", {})
+        state = tracker.record_ask(state, "material")
+        state = tracker.update("no idea", state, turn=1)
+        self.assertEqual(state.attribute_refusals.get("material"), 1)
+        state = tracker.record_ask(state, "material")
+        state = tracker.update("don't care", state, turn=2)
+        self.assertNotIn("material", state.attribute_refusals)
+
+    def test_attribute_refusals_round_trips_through_dict(self) -> None:
+        tracker = DialogueStateTracker(extractor=scripted({}))
+        state = tracker.reset("s", {})
+        state = tracker.record_ask(state, "material")
+        state = tracker.update("nothing relevant", state, turn=1)
+        rebuilt = DialogueState.from_dict(state.to_dict())
+        self.assertEqual(rebuilt.attribute_refusals, state.attribute_refusals)
 
 
 class ContractTests(unittest.TestCase):
@@ -438,11 +467,11 @@ class LLMTransportTests(unittest.TestCase):
     def test_intent_is_returned_alongside_slots_from_one_call(self) -> None:
         payload = {k: [] for k in list(ASK_ATTRIBUTES) + ["rejected", "no_preference"]}
         payload["category"] = ["boots"]
-        payload["intent"] = "Buying"
+        payload["intent"] = "buying"
         self._serve(json.dumps(payload), {"prompt_tokens": 20, "completion_tokens": 4})
         state = DialogueState(turn=3)
         extracted = extract_slots("I want boots under 100", state)
-        self.assertEqual(extracted["intent"], "Buying")
+        self.assertEqual(extracted["intent"], "buying")
         self.assertEqual(extracted["category"], ["boots"])
         # One call did both jobs: only one request was ever captured.
         self.assertEqual(self.captured["body"]["messages"][0]["role"], "system")

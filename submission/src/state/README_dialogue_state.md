@@ -7,7 +7,7 @@ reads. One function reads the words. Everything else works from the object.
 | File                                         | Job                                             | Calls an LLM |
 | -------------------------------------------- | ----------------------------------------------- | ------------ |
 | [dialogue_state.py](dialogue_state.py)       | Holds the state, applies changes                | no           |
-| [llm_extractor.py](llm_extractor.py)         | Words to slots and Buying/Browsing, in one call | yes          |
+| [llm_extractor.py](llm_extractor.py)         | Words to slots and buying/browsing, in one call | yes          |
 | [context_distiller.py](context_distiller.py) | History to what we trust                        | no           |
 | [llm_client.py](llm_client.py)               | Shared HTTP plumbing                            | yes          |
 
@@ -21,12 +21,25 @@ independent calls for two independent questions.
 
 
 
+## Where this module fits the four pillars
+
+| Pillar | Relevant? | What this module contributes |
+| ------ | --------- | ----------------------------------------------------------------- |
+| I. Intent Routing & Hybrid Pipeline | yes | `state.intent` (`"buying"`/`"browsing"`) is set once per turn by the joint extraction call and read directly by `search.py`'s RRF weighting — this module is the source of the routing signal, not the routing itself. |
+| II. Dialog Strategy | yes, this is the state machine | Information Accumulation is additive multi-value slots (Phase 2, step 3). Intent Override is the named-retraction path plus the structural single-value-slot check, surfaced as `conflicts_with_previous` and `history.override_turns`. |
+| III. Self-Evolution | yes, two ways | (a) `context_distiller.py`'s `session_summary` distills the turn history into `carry_forward`/`profile_corroboration` — within-session only, explicitly not cross-session memory (see Phase 3). (b) `DialogueState.attribute_refusals` tracks how many turns running an attribute has been asked without being answered or declined, consumed by `generation/weighted_entropy.py`'s `HARD_REFUSAL_LIMIT` to stop asking about it — the adaptive-orchestration piece: the agent's own questioning strategy changes based on how the conversation has gone. |
+| IV. Evaluation Matrix | no | This module has no metrics logic; Hit Rate/MRR/MTTC live in `evaluator/`. It only supplies the state those metrics are computed against. |
+
+---
+
+
+
 ## The workflow, in order
 
 ```text
 Phase 0  reset()            once per session
    |
-Phase 1  extract_slots()    words  ->  {"category": ["boots"], ..., "intent": "Buying"}
+Phase 1  extract_slots()    words  ->  {"category": ["boots"], ..., "intent": "buying"}
    |
 Phase 2  update()           slots + intent  ->  new DialogueState
    |
@@ -102,21 +115,21 @@ and the only LLM call in the whole state layer.
 The model is shown the current slots on purpose. "Boots instead" only means
 something if you know what it replaces, so showing the slots is what lets the
 model name the old value precisely. The same context (how many slots are
-already filled) is also what it uses to judge Buying versus Browsing: a
+already filled) is also what it uses to judge buying versus browsing: a
 confidently-worded opener with nothing filled in yet is usually still
-Browsing, and a vague-sounding message late in a well-specified session is
-usually still Buying.
+browsing, and a vague-sounding message late in a well-specified session is
+usually still buying.
 
 ```python
 extract_slots("actually hiking boots instead, under $120", state)
-# {"category": ["hiking boots"], "budget": ["<=120"], "rejected": ["running shoes"], "intent": "Buying"}
+# {"category": ["hiking boots"], "budget": ["<=120"], "rejected": ["running shoes"], "intent": "buying"}
 ```
 
 **Example** — continuing the running example, turn 1 (`state` is the fresh one from Phase 0):
 
 ```python
 extract_slots("I need black waterproof hiking boots under $120", state)
-# {"intent": "Buying", "category": ["hiking boots"], "color": ["black"],
+# {"intent": "buying", "category": ["hiking boots"], "color": ["black"],
 #  "budget": ["<=120"], "feature": ["waterproof"]}
 ```
 
@@ -125,7 +138,7 @@ The bare reply resolves against that context instead of landing in `other`:
 
 ```python
 extract_slots("US 9", state)
-# {"intent": "Buying", "size": ["US 9"]}
+# {"intent": "buying", "size": ["US 9"]}
 ```
 
 Four kinds of key come back:
@@ -136,7 +149,7 @@ Four kinds of key come back:
 | the ten attribute names | new or changed values, each a list                                     |
 | `rejected`              | **values** the customer dropped, copied exactly from the current slots |
 | `no_preference`         | attribute **names** they refuse to constrain ("any colour is fine")    |
-| `intent`                | a bare string, `"Buying"` or `"Browsing"` — not a list, and not a slot |
+| `intent`                | a bare string, `"buying"` or `"browsing"` — not a list, and not a slot |
 
 
 `rejected` is values, `no_preference` is names. That is the easy thing to mix up.
@@ -147,7 +160,7 @@ nothing downstream reads prose prices.
 `intent` is two labels, not four. The public set also labels sessions Intent
 Override and Boundary, but the state already reports those without any extra
 model reasoning (`conflicts_with_previous` and `no_preference_attributes()`).
-An override session is still Buying or Browsing on every turn.
+An override session is still buying or browsing on every turn.
 
 `{}` means nothing new and no intent resolved. A failed API call also returns
 `{}`, and the two are deliberately identical. There is no keyword fallback
@@ -184,7 +197,7 @@ DialogueState(
                       "feature": ["waterproof"], "use_case": [], "other": [], "rejected": []},
     user_profile={...same as Phase 0...},
     previous_top_10=[], previous_ask_attribute="",
-    conflicts_with_previous=False, intent="Buying",
+    conflicts_with_previous=False, intent="buying",
 )
 ```
 
@@ -201,7 +214,7 @@ In order:
    replaced.
 4. **Intent.** Read straight onto `state.intent`. Not sticky: a turn with no
   resolved intent sets it to `None` rather than carrying the previous label
-   forward. Branch on `None`; do not read it as Browsing, since this is a label,
+   forward. Branch on `None`; do not read it as browsing, since this is a label,
    not a routing decision.
 
 `update()` never looks at the message text itself. Every change above comes from
@@ -257,8 +270,7 @@ so every constraint has `revisions=0` and `turns_held=1`):
       {"attribute": "color", "values": ["black"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
       {"attribute": "feature", "values": ["waterproof"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0}
     ],
-    "avoid": [], "declined_attributes": [],
-    "open_attributes": ["material", "size", "style", "brand", "use_case", "other"],
+    "avoid": [],
     "unstable_attributes": [],
     "focus_attributes": ["budget", "category", "color", "feature"],
     "digest": "Wants: budget=<=120; category=hiking boots; color=black; feature=waterproof. Just changed: budget, category, color, feature."
@@ -288,33 +300,17 @@ corroborate a prior.
 | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `constraints`         | every filled slot, with `first_seen_turn`, `last_touched_turn`, `turns_held`, and `revisions` — plain facts, sorted alphabetically by attribute for a deterministic order. No score: a consumer that wants to prioritize one constraint over another computes that itself from these fields. |
 | `avoid`               | each rejected value with the slot it came from and the turn it was dropped                                                                                                                                                                                                                   |
-| `declined_attributes` | attributes the customer refused to constrain                                                                                                                                                                                                                                                 |
-| `open_attributes`     | still worth asking about                                                                                                                                                                                                                                                                     |
 | `unstable_attributes` | slots the customer has already rewritten (`revisions > 0`)                                                                                                                                                                                                                                   |
 | `focus_attributes`    | what changed this turn. On an override turn, this is what to weight up.                                                                                                                                                                                                                      |
 | `digest`              | all of the above as one line of text                                                                                                                                                                                                                                                         |
 
-`declined_attributes` and `open_attributes` can look redundant at first, since a
-declined attribute is already excluded from `open_attributes` (`missing_attributes()`
-filters both filled *and* declined slots out). They exist separately because two
-different consumers need to tell "not yet asked" apart from "customer explicitly said
-they don't care," and neither list alone can distinguish those two cases for an
-attribute that's simply absent from it:
-
-- **Question selection** (Pillar II) only needs `open_attributes` — what's still fair
-  game to ask. It doesn't need to know *why* something isn't askable.
-- **Retrieval/ranking** needs `declined_attributes` specifically, because it changes how
-  a candidate product should be scored. A product with no information on an attribute
-  the customer never mentioned is a minor unknown — some risk in recommending it. A
-  product missing the same information on an attribute the customer explicitly waived
-  ("I don't care about material") should carry **zero penalty** for that gap, because the
-  customer already said it doesn't matter. Without a separate `declined_attributes` list,
-  a ranker scoring "how many stated attributes does this product match" has no way to
-  tell those two cases apart and would unfairly penalize products for a gap that was
-  never actually in play.
-
-Same underlying fact in both cases (a `no_preference:<attribute>` marker in `rejected`),
-surfaced twice because the two jobs need it phrased differently.
+Not included here: a separate `declined_attributes`/`open_attributes` pair used
+to be exposed on `short_term`, but nothing outside this file ever read either
+one — `state.missing_attributes()` and `no_preference_attributes(profile)`
+already give any consumer that needs them directly, so the duplicate fields
+were removed rather than kept as unused surface area. `digest`'s "No
+preference on: ..." line still reflects declined attributes; it just computes
+them locally instead of reading them back off the dict.
 
 `session_summary` fields, each a pattern over the session rather than a fact about
 this one turn:
@@ -434,7 +430,7 @@ print('usage:', drain_usage())
 Working output looks like this:
 
 ```text
-slots: {'intent': 'Buying', 'category': ['hiking boots'], 'color': ['black'], 'budget': ['<=120'], 'feature': ['waterproof']}
+slots: {'intent': 'buying', 'category': ['hiking boots'], 'color': ['black'], 'budget': ['<=120'], 'feature': ['waterproof']}
 usage: {'prompt_tokens': 1470, 'completion_tokens': 340}
 ```
 
@@ -539,7 +535,7 @@ Every one of these works on a plain dict, so nothing needs to import
 | ------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | numeric filter      | `budget_bounds(profile)`                                                     | `{"min_price", "max_price", "target_price"}`, floats or `None`. All `None` means no budget, so skip filtering. Decodes `"<=120"` so you never parse it. |
 | BM25 and dense      | `state.query_terms()`                                                        | every positive value in one flat list                                                                                                                   |
-| RRF weighting       | `state.intent`                                                               | `"Buying"`, `"Browsing"`, or `None`                                                                                                                     |
+| RRF weighting       | `state.intent`                                                               | `"buying"`, `"browsing"`, or `None`                                                                                                                     |
 | RRF on override     | `state.conflicts_with_previous`, `context["short_term"]["focus_attributes"]` | that an override happened, and which slots changed                                                                                                      |
 | negative filtering  | `context["short_term"]["avoid"]`                                             | rejected values with the slot each came from                                                                                                            |
 | entropy questions   | `state.missing_attributes()`                                                 | askable slots only, already excluding filled and permanently declined ones                                                                              |
@@ -576,7 +572,8 @@ Entropy rules map onto what already exists:
 | `previous_top_10`         | `list[str]`            | what was shown last turn                                                                             |
 | `previous_ask_attribute`  | `str`                  | what was asked last turn, or `""`                                                                    |
 | `conflicts_with_previous` | `bool`                 | this turn contradicted earlier state. Recomputed each turn, not sticky.                              |
-| `intent`                  | `str | None`           | `"Buying"` or `"Browsing"` for this turn, or `None` if unresolved. Recomputed each turn, not sticky. |
+| `intent`                  | `str | None`           | `"buying"` or `"browsing"` for this turn, or `None` if unresolved. Recomputed each turn, not sticky. |
+| `attribute_refusals`      | `dict[str, int]`       | consecutive-turn count of an attribute asked without an answer or decline. Cleared once filled or marked no-preference. Carried forward, unlike `conflicts_with_previous`/`intent` (Pillar III). |
 
 
 Guarantees on `session_profile`:
