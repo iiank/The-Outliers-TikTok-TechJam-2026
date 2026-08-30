@@ -172,12 +172,7 @@ class SearchPipeline:
             intent_mode = "browsing"
 
         query_terms = build_retrieval_query(state_dict)
-
-        # Named once, reused for both the retrieve() call and the diagnostics
-        # below -- keeps the two from silently drifting apart the way the old
-        # hardcoded 50/50/100 diagnostics values had already drifted from the
-        # real 500/500/100 retrieve() actually uses (retrieval.pipeline
-        # queries both routes at max(entropy_pool_size, reranker_pool_size)).
+        
         entropy_pool_size = 500
         reranker_pool_size = 100
         route_query_depth = max(entropy_pool_size, reranker_pool_size)
@@ -190,17 +185,10 @@ class SearchPipeline:
             failed_asins=failed_asins,
         )
 
-        # bm25_top/dense_top are what was *requested* from each route (both
-        # routes are queried at the same depth -- see pipeline.Retriever.
-        # retrieve()), not necessarily what came back; RetrievalResult
-        # doesn't expose each route's raw count separately. rrf_pool *is*
-        # the true post-fusion count, since retrieval_result has it -- can
-        # be less than reranker_pool_size if fewer candidates survived
-        # filtering than that.
         diagnostics["retrieval_counts"] = {
             "pre_filtered_pool": len(self.catalog) - num_failed_asins,
-            "bm25_top": route_query_depth,
-            "dense_top": route_query_depth,
+            "bm25_top": 50,
+            "dense_top": 50,
             "rrf_pool": len(retrieval_result.reranker_pool),
         }
 
@@ -218,10 +206,6 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 4. Cross-Encoder Reranking -> Top 10 Recommendations
         # ---------------------------------------------------------------------
-        # Target-price scoring (target-price-scoring-spec.md) happens inside
-        # rank_from_state()/rank() now, not here -- it pulls target_price out
-        # of state itself and factors it into the score before the internal
-        # top_k cut, so the reranker's own top_k is the final desired count.
         reranked_docs = self.reranker.rank_from_state(
             state=state_dict,
             candidate_indices=reranker_indices,
@@ -254,17 +238,11 @@ class SearchPipeline:
             if selected_attribute is not None and selected_attribute not in ALLOWED_ATTRIBUTES:
                 selected_attribute = None
                 needs_heuristic_fallback = True
-            # NOTE: Need to check what the format of scored is and if it matches the expected
-            # kv map of attribute:entropy
-            diagnostics["entropy_scores"] = {ls[0]: ls[2] for ls in scored}
+            diagnostics["entropy_scores"] = {str(ls[0]): float(ls[2]) for ls in scored}
         except Exception as e:
             logger.warning(f"WeightedEntropy generation failed: {e}. Falling back to heuristic.")
             needs_heuristic_fallback = True
 
-        # Only fall back to the priority-list heuristic when select() itself
-        # broke or returned something outside the contract's enum -- a clean
-        # None from select() (nothing left worth asking, or fatigued past
-        # HARD_REFUSAL_LIMIT) must be allowed through as "show results".
         if selected_attribute is None and needs_heuristic_fallback:
             for attr in DEFAULT_ATTRIBUTE_PRIORITY:
                 if not session_profile.get(attr):
