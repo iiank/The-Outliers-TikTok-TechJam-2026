@@ -266,15 +266,18 @@ class SearchPipeline:
         # 5. Question Generation via Weighted Entropy
         # ---------------------------------------------------------------------
         # NOTE: WeightedEntropy is an estimated interface placeholder.
-        # Ensure WeightedEntropy.find_attribute_by_weighted_entropy conforms to this contract.
+        # Ensure WeightedEntropy.explain_selection conforms to this contract.
         selected_attribute: str = ""
+        attribute_scores: List[List[Any]] = []
         try:
-            candidate_attr = self.entropy_gen.find_attribute_by_weighted_entropy(
+            attribute_scores  = self.entropy_gen.explain_selection(
                 state=state_dict,
                 top_500_candidate_indices=entropy_indices,
             )
-            if candidate_attr in ALLOWED_ATTRIBUTES:
-                selected_attribute = candidate_attr
+            if attribute_scores:
+                candidate_attr = str(attribute_scores[0][0])
+                if candidate_attr in ALLOWED_ATTRIBUTES:
+                    selected_attribute = candidate_attr
         except Exception as e:
             logger.warning(f"WeightedEntropy generation failed: {e}. Falling back to heuristic.")
 
