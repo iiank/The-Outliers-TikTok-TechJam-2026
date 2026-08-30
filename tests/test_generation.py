@@ -21,10 +21,10 @@ from evaluator.local_evaluator import (
 )
 
 from embed.store import load_store
-from generation import AskState, AttributeTable, select_attribute
-from generation.weighted_entropy import ASKABLE_ATTRIBUTES, MIN_SCORE
-from retrieval import BM25Index, CatalogIndex, CategoryLookup, Retriever
-from retrieval.category_filter import extract_coarse_category
+from generation import AskState, AttributeTable, explain_selection, select_attribute
+import generation.weighted_entropy as weighted_entropy
+from generation.weighted_entropy import ASKABLE_ATTRIBUTES, FEATURE_SCORE, MIN_SCORE
+from retrieval import BM25Index, CatalogIndex, Retriever
 from retrieval.rrf import weights_for_mode
 
 MODE_FOR_SCENARIO = {
@@ -99,7 +99,6 @@ def run_session(
     ask_state = AskState()
 
     user_message = initial_message(sample, case["category"], disclosed)
-    category_message = user_message
     transcript: List[str] = [user_message]
 
     hit_turn: Optional[int] = None
@@ -110,7 +109,7 @@ def run_session(
     for turn in range(1, MAX_TURNS + 1):
         query_terms = " ".join(transcript)
         result = retriever.retrieve(
-            query_terms, case["mode"], message=category_message, entropy_pool_size=pool_size
+            query_terms, case["mode"], entropy_pool_size=pool_size
         )
         pool = result.entropy_pool
         fused = [(item["parent_asin"], item["score"]) for item in pool]
@@ -154,8 +153,6 @@ def run_session(
                     ask_state.confirm(ask_attribute)
 
         transcript.append(user_message)
-        if extract_coarse_category(user_message):
-            category_message = user_message
 
     return {
         "sample_id": case["sample_id"],
@@ -184,9 +181,14 @@ def main() -> None:
     parser.add_argument("--min-score", type=float, default=MIN_SCORE,
                         help="ask gate: higher asks less often. Sweep 0.0 0.05 0.15 0.3")
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--no-category-filter", action="store_true")
+    parser.add_argument("--feature-score", type=float, default=FEATURE_SCORE,
+                        help="flat score for the untyped 'feature' open question. 0 disables it")
+    parser.add_argument("--explain", type=int, default=2, metavar="N",
+                        help="print a full score breakdown for the first N samples (0 to skip)")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
+
+    weighted_entropy.FEATURE_SCORE = args.feature_score
 
     print("loading catalogue, store and routes ...")
     samples = load_jsonl(args.dataset)
@@ -200,19 +202,19 @@ def main() -> None:
         bm25=BM25Index(args.catalog),
         dense=store,
         catalog_index=catalog_ids,
-        category_lookup=None if args.no_category_filter else CategoryLookup.load(args.catalog),
     )
     table = AttributeTable.load(args.catalog)
     cases = build_cases(samples, categories, products)
     print(f"catalogue {len(catalog_ids)} | dense store {len(store)} | "
           f"askable {', '.join(table.attributes())}")
-    print(f"scoring {len(cases)} of {len(samples)} samples | min_score={args.min_score}\n")
+    print(f"scoring {len(cases)} of {len(samples)} samples | min_score={args.min_score}"
+          f" | feature_score={args.feature_score}\n")
 
     section("1. turn-1 recall by route  (where the purchased product ranks)")
     route_ranks: Dict[str, Dict[str, List[Optional[int]]]] = defaultdict(lambda: defaultdict(list))
     for case in cases:
         message = initial_message(case["sample"], case["category"], set())
-        result = retriever.retrieve(message, case["mode"], message=message, entropy_pool_size=args.pool_size)
+        result = retriever.retrieve(message, case["mode"], entropy_pool_size=args.pool_size)
         fused = [(i["parent_asin"], i["score"]) for i in result.entropy_pool]
         for route, ranking in (
             ("fused", fused),
@@ -299,11 +301,36 @@ def main() -> None:
     if unused:
         print(f"  never chosen: {', '.join(unused)}")
 
+    if args.explain > 0:
+        section("6. worked examples  (entropy vs score, per attribute)")
+        print("entropy_bits is the raw uncertainty of the value distribution over the")
+        print("pool. score is what selection uses, after coverage, cardinality, measured")
+        print("answerability, preference tags and refusal penalties. They disagree often,")
+        print("and the disagreement is the point.\n")
+        for case in cases[: args.explain]:
+            message = initial_message(case["sample"], case["category"], set())
+            result = retriever.retrieve(message, case["mode"], entropy_pool_size=args.pool_size)
+            detail = explain_selection(
+                result.entropy_pool, table, AskState(), case["tags"], min_score=args.min_score
+            )
+            print(f"{case['sample_id']}  [{case['scenario']}]  tags={case['tags']}")
+            print(f"  {message}")
+            print(f"  pool {detail['pool_size']}  ->  ask {detail['selected']}  ({detail['reason']})")
+            print(f"    {'attribute':<11}{'score':>9}{'entropy':>9}{'cov':>7}{'tagw':>7}{'n':>5}  top values")
+            for row in detail["scored"]:
+                values = ", ".join(f"{v}" for v, _ in row["top_values"][:3]) or "-"
+                mark = " *" if row["attribute"] == detail["selected"] else "  "
+                print(f"  {mark}{row['attribute']:<11}{str(row['score']):>9}{row['entropy_bits']:>9}"
+                      f"{row['coverage']:>7}{row['tag_weight']:>7}{row['distinct_values']:>5}  {values}")
+            print()
+
+
     if args.output:
         payload = {
             "catalogue_size": len(catalog_ids),
             "samples_scored": len(cases),
             "min_score": args.min_score,
+            "feature_score": args.feature_score,
             "turn_one_recall": {
                 s: {r: recall_table(v) for r, v in routes.items()} for s, routes in route_ranks.items()
             },

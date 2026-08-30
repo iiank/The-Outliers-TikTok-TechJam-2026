@@ -28,10 +28,13 @@ __all__ = [
     "ask_state_from_profile",
     "AttributeScore",
     "AttributeTable",
+    "WeightedEntropy",
     "MAX_TAG_WEIGHT",
+    "FEATURE_SCORE",
     "MIN_SCORE",
     "TAG_AFFINITY",
     "TAG_STRENGTH",
+    "explain_selection",
     "preference_weight",
     "rank_attributes",
     "rank_weights",
@@ -43,7 +46,7 @@ ALLOWED_ATTRIBUTES = (
     "budget", "feature", "use_case", "other",
 )
 
-ASKABLE_ATTRIBUTES = ("material", "color", "size", "style", "budget", "use_case")
+ASKABLE_ATTRIBUTES = ("material", "color", "size", "style", "budget", "use_case", "brand")
 
 _MISSING = -1
 
@@ -92,9 +95,11 @@ ANSWERABILITY: Dict[str, float] = {
     "size": 0.04,
     "use_case": 0.02,
     "budget": 0.00,
+    "brand": 0.00,
 }
 
 IDEAL_VALUE_COUNT = 12.0
+FEATURE_SCORE = 0.30
 MIN_SCORE = 0.0
 _REFUSAL_DECAY = 0.55
 
@@ -142,6 +147,7 @@ def _extract(product: dict) -> Dict[str, str]:
         if found:
             values[name] = found.group(1).lower()
     values["budget"] = _price_band(product.get("price"))
+    values["brand"] = _text(product.get("store")).strip().lower()
     return values
 
 
@@ -242,6 +248,20 @@ class AttributeScore:
     blocked: bool = False
     top_values: List[Tuple[str, float]] = field(default_factory=list)
 
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "attribute": self.attribute,
+            "score": None if self.score == float("-inf") else round(self.score, 4),
+            "entropy_bits": round(self.entropy, 4),
+            "normalised_entropy": round(self.normalised_entropy, 4),
+            "head_split": round(self.head_split, 4),
+            "coverage": round(self.coverage, 4),
+            "distinct_values": self.distinct_values,
+            "tag_weight": round(self.tag_weight, 4),
+            "refusal_penalty": round(self.refusal_penalty, 4),
+            "blocked": self.blocked,
+            "top_values": [(value, round(mass, 4)) for value, mass in self.top_values],
+        }
 
 def preference_weight(
     attribute: str,
@@ -309,6 +329,7 @@ def rank_attributes(
     include_blocked: bool = False,
 ) -> List[AttributeScore]:
     state = state or AskState()
+    skip_feature = {"feature"} if "feature" in state.banned else set()
     rows, positions = _pool_indices(pool)
     if rows.size == 0:
         return []
@@ -377,9 +398,132 @@ def rank_attributes(
                 top_values=top,
             )
         )
+    if "feature" not in skip_feature:
+        feature_score = FEATURE_SCORE * state.penalty("feature")
+        scored.append(
+            AttributeScore(
+                attribute="feature",
+                score=float(feature_score),
+                entropy=0.0,
+                normalised_entropy=0.0,
+                head_split=0.0,
+                coverage=1.0,
+                distinct_values=0,
+                refusal_penalty=state.penalty("feature"),
+                blocked=False,
+            )
+        )
+    elif include_blocked:
+        scored.append(
+            AttributeScore(
+                attribute="feature", score=float("-inf"), entropy=0.0,
+                normalised_entropy=0.0, head_split=0.0, coverage=1.0,
+                distinct_values=0, blocked=True,
+            )
+        )
+
     scored.sort(key=lambda item: (-item.score, item.attribute))
     return scored
 
+
+class WeightedEntropy:
+    def __init__(
+        self,
+        catalog_path: "str | Path" = "data/catalog.jsonl",
+        table: Optional[AttributeTable] = None,
+        half_life: float = 20.0,
+        strength: Optional[float] = None,
+        min_score: float = MIN_SCORE,
+    ) -> None:
+        self.table = table if table is not None else AttributeTable.load(catalog_path)
+        self.half_life = half_life
+        self.strength = strength
+        self.min_score = min_score
+
+    @staticmethod
+    def _pool(candidate_indices: Sequence[int]) -> List[Dict[str, Any]]:
+        return [{"catalog_index": int(index)} for index in candidate_indices]
+
+    def _ask_state(self, state: Mapping[str, Any]) -> AskState:
+        return ask_state_from_profile(
+            state.get("session_profile") or {},
+            str(state.get("previous_ask_attribute") or ""),
+            state.get("attribute_refusals") or None,
+        )
+
+    @staticmethod
+    def _tags(state: Mapping[str, Any]) -> List[str]:
+        profile = state.get("user_profile") or {}
+        return [str(tag) for tag in (profile.get("preference_tags") or [])]
+
+    def explain_selection(
+        self,
+        state: Mapping[str, Any],
+        top_500_candidate_indices: Sequence[int],
+        include_blocked: bool = False,
+    ) -> List[List[Any]]:
+        ranked = rank_attributes(
+            self._pool(top_500_candidate_indices),
+            self.table,
+            self._ask_state(state),
+            self._tags(state),
+            half_life=self.half_life,
+            strength=self.strength,
+            include_blocked=include_blocked,
+        )
+        return [
+            [
+                item.attribute,
+                round(item.entropy, 4),
+                None if item.score == float("-inf") else round(item.score, 4),
+            ]
+            for item in ranked
+        ]
+
+    def select(
+        self,
+        state: Mapping[str, Any],
+        top_500_candidate_indices: Sequence[int],
+    ) -> Tuple[Optional[str], List[List[Any]]]:
+        scored = self.explain_selection(state, top_500_candidate_indices)
+        if not scored:
+            return None, scored
+        best_attribute, _entropy, best_score = scored[0]
+        if best_score is None or best_score < self.min_score:
+            return None, scored
+        return str(best_attribute), scored
+
+
+def explain_selection(
+    pool: Sequence[Dict[str, Any]],
+    table: AttributeTable,
+    state: Optional[AskState] = None,
+    preference_tags: Optional[Sequence[str]] = None,
+    half_life: float = 20.0,
+    strength: Optional[float] = None,
+    min_score: float = MIN_SCORE,
+    include_blocked: bool = True,
+) -> Dict[str, Any]:
+    ranked = rank_attributes(
+        pool, table, state, preference_tags,
+        half_life=half_life, strength=strength, include_blocked=include_blocked,
+    )
+    eligible = [item for item in ranked if not item.blocked and np.isfinite(item.score)]
+    best = eligible[0] if eligible else None
+    asked = bool(best is not None and best.score >= min_score)
+
+    return {
+        "selected": best.attribute if asked else None,
+        "asked": asked,
+        "reason": (
+            "argmax above gate" if asked
+            else "no eligible attribute" if best is None
+            else f"best score {best.score:.4f} below min_score {min_score}"
+        ),
+        "pool_size": len(pool),
+        "min_score": min_score,
+        "scored": [item.as_dict() for item in ranked],
+    }
 
 def select_attribute(
     pool: Sequence[Dict[str, Any]],
