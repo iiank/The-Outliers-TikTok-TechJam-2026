@@ -265,8 +265,6 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 5. Question Generation via Weighted Entropy
         # ---------------------------------------------------------------------
-        # NOTE: WeightedEntropy is an estimated interface placeholder.
-        # Ensure WeightedEntropy.explain_selection conforms to this contract.
         selected_attribute: str = ""
         attribute_scores: List[List[Any]] = []
         try:
