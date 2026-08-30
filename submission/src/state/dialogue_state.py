@@ -248,10 +248,11 @@ def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, 
 class _SessionHistory:
     """Compact, incrementally-updated bookkeeping for one session.
 
-    Everything :mod:`state.context_distiller` needs beyond the current
-    state — sized to the number of distinct values/attributes ever touched,
-    not to the number of turns. Updated once per turn in
-    :meth:`DialogueStateTracker.update`; nothing replays a log to rebuild it.
+    Tracks more than the current state can express — when a value first
+    appeared, how many times an attribute was revised — sized to the number
+    of distinct values/attributes ever touched, not to the number of turns.
+    Updated once per turn in :meth:`DialogueStateTracker.update`; nothing
+    replays a log to rebuild it.
     """
 
     def __init__(self) -> None:
