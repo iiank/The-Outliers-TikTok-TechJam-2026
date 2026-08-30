@@ -148,7 +148,7 @@ class SearchPipeline:
         self.reranker: Reranker = reranker or Reranker()
         self.entropy_gen: WeightedEntropy = entropy_gen or WeightedEntropy()
 
-    def search(self, state: Any) -> Tuple[List[str], Optional[str]]:
+    def search(self, state: Any) -> Tuple[List[str], Optional[str], Dict[str, Any]]:
         """
         Executes end-to-end multi-stage recommendation and question generation.
 
@@ -156,11 +156,21 @@ class SearchPipeline:
         """
         state_dict = _to_dict(state)
         session_profile = state_dict.get("session_profile", {})
+        diagnostics = {}
+        diagnostics["state"] = state_dict
 
         # ---------------------------------------------------------------------
         # 1. Hard Filtering
         # ---------------------------------------------------------------------
         failed_asins: List[str] = get_failed_hard_filter_asins(state_dict, self.catalog)
+        num_failed_asins = len(failed_asins)
+        diagnostics["hard_filters_dropped"] = num_failed_asins
+        diagnostics["retrieval_counts"] = {
+            "pre_filtered_pool": 50000 - num_failed_asins,
+            "bm25_top": 50,
+            "dense_top": 50,
+            "rrf_pool": 100
+        }
 
         # ---------------------------------------------------------------------
         # 2. Hybrid Retrieval (Pre-filtered candidate pool -> BM25 + Dense -> RRF)
@@ -213,6 +223,16 @@ class SearchPipeline:
         top_10_asins = [
             doc["parent_asin"] for doc in price_scored_docs[:10] if "parent_asin" in doc
         ]
+        # NOTE: might need to amend this list based on whether the price scoring stays
+        # NOTE: need to get the doc title
+        diagnostics["top_candidates_ce"] = [
+            {
+                "asin": doc["parent_asin"],
+                "score": doc["score"],
+                "title": doc.get("title", "")
+            }
+            for doc in reranked_docs[:5]
+        ]
 
         # ---------------------------------------------------------------------
         # 5. Question Generation via Weighted Entropy
@@ -220,13 +240,16 @@ class SearchPipeline:
         selected_attribute: Optional[str] = None
         needs_heuristic_fallback = False
         try:
-            selected_attribute, _scored = self.entropy_gen.select(
+            selected_attribute, scored = self.entropy_gen.select(
                 state=state_dict,
                 top_500_candidate_indices=entropy_indices,
             )
             if selected_attribute is not None and selected_attribute not in ALLOWED_ATTRIBUTES:
                 selected_attribute = None
                 needs_heuristic_fallback = True
+            # NOTE: Need to check what the format of scored is and if it matches the expected
+            # kv map of attribute:entropy
+            diagnostics["entropy_scores"] = {ls[0]: ls[2] for ls in scored}
         except Exception as e:
             logger.warning(f"WeightedEntropy generation failed: {e}. Falling back to heuristic.")
             needs_heuristic_fallback = True
@@ -243,7 +266,7 @@ class SearchPipeline:
             if selected_attribute is None:
                 selected_attribute = "feature"
 
-        return top_10_asins, selected_attribute
+        return top_10_asins, selected_attribute, diagnostics
 
 # -----------------------------------------------------------------------------
 # Module Singleton Wrapper
