@@ -7,7 +7,9 @@ from reranker.reranker import Reranker, load_reranker_catalog
 from retrieval.bm25 import BM25Index
 from retrieval.catalog_ids import CatalogIndex
 from retrieval.pipeline import Retriever
+from retrieval.price_scoring import apply_target_price_scoring
 from embed.store import load_store
+from state.dialogue_state import budget_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -189,16 +191,27 @@ class SearchPipeline:
                 entropy_indices.append(idx)
 
         # ---------------------------------------------------------------------
-        # 4. Cross-Encoder Reranking -> Top 10 Recommendations
+        # 4. Cross-Encoder Reranking -> Target-Price Scoring -> Top 10
         # ---------------------------------------------------------------------
+        # Reranked at the full candidate-pool width, not just 10: target-price
+        # scoring (below) needs room to move a candidate up from outside the
+        # cutoff, which it can't do if the list is already truncated to 10.
         reranked_docs = self.reranker.rank_from_state(
             state=state_dict,
             candidate_indices=reranker_indices,
             catalog=self.catalog,
-            top_k=10,
+            top_k=len(reranker_indices),
         )
+
+        # Soft price adjustment (target-price-scoring-spec.md), never a hard
+        # filter -- multiplies each candidate's rerank score by a
+        # closeness-to-target factor, then re-sorts. A no-op when the
+        # customer hasn't stated a target price this turn.
+        target_price = budget_bounds(session_profile).get("target_price")
+        price_scored_docs = apply_target_price_scoring(reranked_docs, target_price=target_price)
+
         top_10_asins = [
-            doc["parent_asin"] for doc in reranked_docs if "parent_asin" in doc
+            doc["parent_asin"] for doc in price_scored_docs[:10] if "parent_asin" in doc
         ]
 
         # ---------------------------------------------------------------------
