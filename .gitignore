@@ -17,7 +17,6 @@ docs/participant_release_checklist.md
 tests/test_5core_builder.py
 tests/test_organizer_pipeline.py
 *.log
-artifacts/
 .venv/
 
 # reranker
@@ -25,3 +24,9 @@ artifacts/
 *.safetensors
 *.bin
 *.pt
+
+# generation
+submission/src/generation/tune_preference_tag.py
+
+# embed
+artifacts/
