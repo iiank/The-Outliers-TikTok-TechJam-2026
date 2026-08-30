@@ -19,50 +19,6 @@ DEFAULT_ATTRIBUTE_PRIORITY: List[str] = ["material", "color", "size", "brand", "
 HARD FILTERING
 """
 
-def _parse_single_budget_rule(rule_str: str) -> Optional[Callable[[float], bool]]:
-    """Parses budget strings like '<=120', '< 50', '>=30', '$100' into a predicate."""
-    if not isinstance(rule_str, str):
-        return None
-
-    cleaned = rule_str.strip().lower()
-    match = re.search(r"(<=|>=|<|>|==|=)?\s*\$?\s*(\d+(?:\.\d+)?)", cleaned)
-    if not match:
-        return None
-
-    op, val_str = match.groups()
-    val = float(val_str)
-
-    if op == "<=" or op is None:  # Default to upper bound (budget cap) if no operator
-        return lambda price: price <= val
-    elif op == "<":
-        return lambda price: price < val
-    elif op == ">=":
-        return lambda price: price >= val
-    elif op == ">":
-        return lambda price: price > val
-    elif op in ("==", "="):
-        return lambda price: abs(price - val) < 1e-4
-    return None
-
-def is_budget_satisfied(price: Optional[Union[float, int]], budget_rules: List[str]) -> bool:
-    """
-    Evaluates whether a product price satisfies all budget rules.
-    Missing/null prices pass by default.
-    """
-    if price is None:
-        return True
-
-    try:
-        numeric_price = float(price)
-    except (ValueError, TypeError):
-        return True
-
-    for rule in budget_rules:
-        predicate = _parse_single_budget_rule(rule)
-        if predicate and not predicate(numeric_price):
-            return False
-    return True
-
 def is_category_satisfied(
     catalog_category: Optional[Union[List[str], str]],
     target_categories: List[str]
@@ -110,15 +66,14 @@ def get_failed_hard_filter_asins(
     reranker_catalog: List[Dict[str, Any]]
 ) -> List[str]:
     """
-    Extracts category and budget hard filters from state, applies them to reranker_catalog,
+    Extracts category hard filters from state, applies them to reranker_catalog,
     and returns parent_asins that failed either constraint.
     """
     session_profile = state.get("session_profile", {})
     target_categories = [c for c in session_profile.get("category", []) if c]
-    budget_rules = [b for b in session_profile.get("budget", []) if b]
 
     # If no hard filters exist, skip filtering
-    if not target_categories and not budget_rules:
+    if not target_categories:
         return []
 
     failed_asins: List[str] = []
@@ -128,15 +83,9 @@ def get_failed_hard_filter_asins(
         if not parent_asin:
             continue
 
-        item_price = item.get("price")
         item_category = item.get("category")
 
-        # 1. Evaluate Budget constraint
-        if budget_rules and not is_budget_satisfied(item_price, budget_rules):
-            failed_asins.append(parent_asin)
-            continue
-
-        # 2. Evaluate Category constraint
+        # Evaluate Category constraint
         if target_categories and not is_category_satisfied(item_category, target_categories):
             failed_asins.append(parent_asin)
             continue
@@ -179,14 +128,7 @@ class SearchPipeline:
         entropy_gen: Optional[WeightedEntropy] = None,
         catalog: Optional[List[Dict[str, Any]]] = None,
     ):
-        # CatalogIndex (data/catalog.jsonl) is the one shared parent_asin
-        # <-> index mapping. self.catalog's row order is built *from* it
-        # (looked up by parent_asin, never trusted positionally), so
-        # catalog_index.index_of(asin) and self.catalog[idx] agree by
-        # construction, regardless of reranker_catalog.jsonl's own on-disk
-        # order. Raises KeyError at startup if any catalog.jsonl asin is
-        # missing from reranker_catalog.jsonl, instead of silently
-        # misaligning indices later.
+        # CatalogIndex is the shared parent_asin <-> index mapping.
         self.catalog_index = CatalogIndex.load("data/catalog.jsonl")
 
         if catalog is not None:
@@ -221,9 +163,6 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 2. Hybrid Retrieval (Pre-filtered candidate pool -> BM25 + Dense -> RRF)
         # ---------------------------------------------------------------------
-        # Browsing, not buying, is the default -- matches
-        # buying-browsing-pipeline-spec.md, which specifies browsing as
-        # the default until a hard constraint is disclosed.
         intent_mode = state_dict.get("intent") or "browsing"
         if intent_mode not in ("buying", "browsing"):
             intent_mode = "browsing"
