@@ -1,4 +1,4 @@
-"""Personalized Context Distillation (Pillar III, Dynamic Context Programming).
+"""Personalized Context Distillation 
 
 Reads the accumulated dialogue history and derives what the raw state cannot
 express: how *durable* each constraint is, what the customer has moved away
@@ -85,14 +85,6 @@ the markers are gone, and each term carries the slot it vacated, so a ranker can
 penalize "black" as a *colour* without also penalizing a product whose brand
 name contains it.
 
-``declined_attributes``: attribute names from the ``no_preference:`` markers.
-Not a duplicate of the raw markers: the marker prefix is a storage detail, and
-this list is already parsed and validated against ``ASK_ATTRIBUTES``.
-
-``open_attributes``: still worth asking about — ``state.missing_attributes()``,
-carried through so a consumer has the question surface and the ranking context
-in one object instead of two.
-
 ``unstable_attributes``: attributes revised at least once — the raw
 ``revisions`` count from ``constraints``, filtered to non-zero, so a consumer
 that only wants "has this customer changed their mind on X" does not have to
@@ -140,7 +132,6 @@ Standard library only.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict, List, Mapping, Sequence, Set
 
 from .dialogue_state import (
@@ -149,7 +140,7 @@ from .dialogue_state import (
     no_preference_attributes,
 )
 
-__all__ = ["SCHEMA_VERSION", "distill", "distill_session"]
+__all__ = ["SCHEMA_VERSION", "distill"]
 
 #: Bump on any breaking change to the emitted shape.
 SCHEMA_VERSION = 4
@@ -163,17 +154,6 @@ _TAG_STOPWORDS = frozenset({"and", "for", "of", "the", "with", "a", "an", "to", 
 # --------------------------------------------------------------------------
 # Public entry points
 # --------------------------------------------------------------------------
-
-
-def distill_session(tracker: Any, state: DialogueState) -> Dict[str, Any]:
-    """Convenience wrapper: pull the session's history off a tracker, then distill.
-
-    Args:
-        tracker: A :class:`state.dialogue_state.DialogueStateTracker`. Only
-            ``get_history_summary`` is used, so any object with that method works.
-        state: The current state, normally the one ``update()`` just returned.
-    """
-    return distill(tracker.get_history_summary(state.session_id), state)
 
 
 def distill(
@@ -220,13 +200,11 @@ def distill(
     short_term: Dict[str, Any] = {
         "constraints": constraints,
         "avoid": avoid,
-        "declined_attributes": declined,
-        "open_attributes": state.missing_attributes(),
         "unstable_attributes": unstable,
         "focus_attributes": focus,
         "digest": "",
     }
-    short_term["digest"] = _digest(short_term)
+    short_term["digest"] = _digest(short_term, declined)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -314,7 +292,7 @@ def _avoid(
     return avoid
 
 
-def _digest(short_term: Mapping[str, Any]) -> str:
+def _digest(short_term: Mapping[str, Any], declined: Sequence[str]) -> str:
     """One prompt-ready line. Adds no information the structure lacks."""
     parts: List[str] = [
         "{attribute}={values}".format(attribute=item["attribute"], values="/".join(item["values"]))
@@ -324,8 +302,8 @@ def _digest(short_term: Mapping[str, Any]) -> str:
     avoid = [str(item["value"]) for item in short_term["avoid"]]
     if avoid:
         line += ". Avoid: " + ", ".join(avoid)
-    if short_term["declined_attributes"]:
-        line += ". No preference on: " + ", ".join(short_term["declined_attributes"])
+    if declined:
+        line += ". No preference on: " + ", ".join(declined)
     if short_term["focus_attributes"]:
         line += ". Just changed: " + ", ".join(short_term["focus_attributes"])
     return line + "."
@@ -408,9 +386,3 @@ def _tokens(text: str) -> Set[str]:
     """Lowercase alphanumeric words, minus filler. No regex needed."""
     folded = "".join(char if char.isalnum() else " " for char in text.lower())
     return {word for word in folded.split() if len(word) > 1 and word not in _TAG_STOPWORDS}
-
-
-def _self_check() -> None:  # pragma: no cover - exercised by __main__ only
-    """Round-trip the output through json, so the contract cannot silently rot."""
-    state = DialogueState(session_id="check", turn=1)
-    json.dumps(distill({}, state))

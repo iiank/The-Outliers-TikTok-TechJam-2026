@@ -148,11 +148,11 @@ class SearchPipeline:
         self.reranker: Reranker = reranker or Reranker()
         self.entropy_gen: WeightedEntropy = entropy_gen or WeightedEntropy()
 
-    def search(self, state: Any) -> Tuple[List[str], str]:
+    def search(self, state: Any) -> Tuple[List[str], Optional[str]]:
         """
         Executes end-to-end multi-stage recommendation and question generation.
 
-        Returns:     Tuple[List[str], str]: (Top 10 recommended parent_asins, selected attribute to inquire)
+        Returns:     Tuple[List[str], Optional[str]]: (Top 10 recommended parent_asins, selected attribute to inquire, or None to show results without asking)
         """
         state_dict = _to_dict(state)
         session_profile = state_dict.get("session_profile", {})
@@ -217,27 +217,30 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 5. Question Generation via Weighted Entropy
         # ---------------------------------------------------------------------
-        selected_attribute: str = ""
-        attribute_scores: List[List[Any]] = []
+        selected_attribute: Optional[str] = None
+        needs_heuristic_fallback = False
         try:
-            attribute_scores  = self.entropy_gen.explain_selection(
+            selected_attribute, _scored = self.entropy_gen.select(
                 state=state_dict,
                 top_500_candidate_indices=entropy_indices,
             )
-            if attribute_scores:
-                candidate_attr = str(attribute_scores[0][0])
-                if candidate_attr in ALLOWED_ATTRIBUTES:
-                    selected_attribute = candidate_attr
+            if selected_attribute is not None and selected_attribute not in ALLOWED_ATTRIBUTES:
+                selected_attribute = None
+                needs_heuristic_fallback = True
         except Exception as e:
             logger.warning(f"WeightedEntropy generation failed: {e}. Falling back to heuristic.")
+            needs_heuristic_fallback = True
 
-        # Fallback to next unfilled high-value attribute if invalid or empty
-        if not selected_attribute:
+        # Only fall back to the priority-list heuristic when select() itself
+        # broke or returned something outside the contract's enum -- a clean
+        # None from select() (nothing left worth asking, or fatigued past
+        # HARD_REFUSAL_LIMIT) must be allowed through as "show results".
+        if selected_attribute is None and needs_heuristic_fallback:
             for attr in DEFAULT_ATTRIBUTE_PRIORITY:
                 if not session_profile.get(attr):
                     selected_attribute = attr
                     break
-            if not selected_attribute:
+            if selected_attribute is None:
                 selected_attribute = "feature"
 
         return top_10_asins, selected_attribute
@@ -247,7 +250,7 @@ class SearchPipeline:
 # -----------------------------------------------------------------------------
 _PIPELINE_INSTANCE: Optional[SearchPipeline] = None
 
-def search(state: Any) -> Tuple[List[str], str]:
+def search(state: Any) -> Tuple[List[str], Optional[str]]:
     """
     Overarching search API called by agent.py.
     Maintains persistent memory instances of models and catalog.

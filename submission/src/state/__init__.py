@@ -18,7 +18,6 @@ from .context_distiller import distill
 from .dialogue_state import (
     ASK_ATTRIBUTES,
     INTENT_LABELS,
-    SLOT_KEYS,
     DialogueState,
     DialogueStateTracker,
     budget_bounds,
@@ -31,7 +30,6 @@ from .llm_client import drain_usage
 __all__ = [
     "ASK_ATTRIBUTES",
     "INTENT_LABELS",
-    "SLOT_KEYS",
     "DialogueState",
     "DialogueStateTracker",
     "budget_bounds",
