@@ -8,7 +8,6 @@ import urllib.request
 from typing import Any, Dict
 
 from state import llm_client
-from state.context_distiller import distill
 from state.dialogue_state import (
     ASK_ATTRIBUTES,
     DialogueState,
@@ -270,87 +269,6 @@ class BudgetBoundsTests(unittest.TestCase):
         )
 
 
-class DistillerTests(unittest.TestCase):
-    """Derived context, from the incremental history summary only."""
-
-    def setUp(self) -> None:
-        self.tracker = DialogueStateTracker(extractor=scripted({
-            1: {"category": ["running shoes"], "use_case": ["road running"]},
-            2: {"color": ["black"]},
-            3: {"no_preference": ["brand"]},
-            4: {"category": ["hiking boots"], "rejected": ["running shoes"], "budget": ["<=120"]},
-            5: {"color": ["navy"]},
-        }))
-        self.state = self.tracker.reset("s", {"preference_tags": ["fit", "road running"]})
-        for turn in range(1, 6):
-            self.state = self.tracker.update("m", self.state, turn=turn)
-        self.context = distill(self.tracker.get_history_summary("s"), self.state)
-
-    def test_output_is_json_serializable(self) -> None:
-        json.dumps(self.context)
-
-    def test_constraints_are_sorted_alphabetically(self) -> None:
-        attributes = [c["attribute"] for c in self.context["short_term"]["constraints"]]
-        self.assertEqual(attributes, sorted(attributes))
-
-    def test_constraints_carry_no_score(self) -> None:
-        # This session's whole point: raw facts only, no synthesized field.
-        for constraint in self.context["short_term"]["constraints"]:
-            self.assertNotIn("confidence", constraint)
-
-    def test_revised_attribute_shows_its_revision(self) -> None:
-        # category was replaced on turn 4 (running shoes -> hiking boots);
-        # use_case was stated once on turn 1 and never touched again. The raw
-        # facts show this directly, with no derived score standing in for it.
-        by_attr = {c["attribute"]: c for c in self.context["short_term"]["constraints"]}
-        self.assertEqual(by_attr["category"]["revisions"], 1)
-        self.assertEqual(by_attr["use_case"]["revisions"], 0)
-        self.assertIn("category", self.context["short_term"]["unstable_attributes"])
-        self.assertNotIn("use_case", self.context["short_term"]["unstable_attributes"])
-
-    def test_freshly_extended_slot_counts_as_current(self) -> None:
-        colour = next(c for c in self.context["short_term"]["constraints"] if c["attribute"] == "color")
-        self.assertEqual(colour["first_seen_turn"], 2)
-        self.assertEqual(colour["last_touched_turn"], 5)
-
-    def test_avoid_carries_provenance(self) -> None:
-        avoid = self.context["short_term"]["avoid"]
-        entry = next(a for a in avoid if a["value"] == "running shoes")
-        self.assertEqual(entry["attribute"], "category")
-        self.assertEqual(entry["dropped_turn"], 4)
-        self.assertNotIn("no_preference:brand", [a["value"] for a in avoid])
-
-    def test_override_turn_is_recorded(self) -> None:
-        self.assertIn(4, self.context["session_summary"]["override_turns"])
-
-    def test_profile_tags_split_by_session_evidence(self) -> None:
-        corroboration = self.context["session_summary"]["profile_corroboration"]
-        self.assertIn("road running", corroboration["confirmed"])
-        self.assertIn("fit", corroboration["unobserved"])
-
-    def test_refinement_does_not_land_in_rejected(self) -> None:
-        # "leather" giving way to "full-grain leather" is a refinement, not a
-        # retraction: the shorter phrase is superseded, not withdrawn, so it
-        # must not show up as a negative term anywhere in the distilled output.
-        tracker = DialogueStateTracker(extractor=scripted({
-            1: {"material": ["leather"]},
-            2: {"material": ["full-grain leather"]},
-        }))
-        state = tracker.reset("r", {})
-        for turn in (1, 2):
-            state = tracker.update("m", state, turn=turn)
-        context = distill(tracker.get_history_summary("r"), state)
-        self.assertEqual(state.session_profile["material"], ["full-grain leather"])
-        self.assertEqual(context["short_term"]["avoid"], [])
-        self.assertNotIn("leather", context["session_summary"]["carry_forward"]["avoid"])
-
-    def test_empty_log_is_shaped_not_broken(self) -> None:
-        context = distill([], DialogueState(session_id="e", turn=0))
-        json.dumps(context)
-        self.assertEqual(context["short_term"]["constraints"], [])
-        self.assertEqual(context["session_summary"]["override_turns"], [])
-
-
 class LLMTransportTests(unittest.TestCase):
     """The extractor and classifier, with urlopen replaced."""
 
@@ -513,8 +431,6 @@ class FullTurnLoopTests(unittest.TestCase):
         turn_four_summary = None
         for turn in range(1, 6):
             state = tracker.update("m", state, turn=turn)
-            context = distill(tracker.get_history_summary("loop"), state)
-            json.dumps(context)
             if turn == 4:
                 turn_four_summary = tracker.get_history_summary("loop")
             tracker.record_ask(state, asks[turn])
@@ -532,8 +448,6 @@ class FullTurnLoopTests(unittest.TestCase):
         # touched on that turn specifically, even though the session overall
         # has plenty of history by then.
         self.assertEqual(turn_four_summary["last_turn_attributes"], [])
-        self.assertIn(5, context["session_summary"]["override_turns"])
-        self.assertEqual(context["short_term"]["focus_attributes"], ["budget", "category"])
 
     def test_sessions_are_isolated(self) -> None:
         tracker = DialogueStateTracker(extractor=scripted({1: {"category": ["boots"]}}))

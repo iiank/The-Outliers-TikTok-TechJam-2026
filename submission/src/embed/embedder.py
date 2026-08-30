@@ -24,7 +24,7 @@ class Embedder:
 
     @property
     def dim(self) -> int:
-        return int(self.model.get_embedding_dimension())
+        return int(self.model.get_sentence_embedding_dimension())
 
     def encode_products(self, texts: list[str], batch_size: int = 64, show_progress: bool = True) -> np.ndarray:
         payload = [self.doc_prefix + t for t in texts] if self.doc_prefix else texts
