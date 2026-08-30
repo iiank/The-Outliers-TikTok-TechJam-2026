@@ -15,7 +15,6 @@ st.set_page_config(
 st.title("🛍️ TechJam Conversational Recommender & Intelligent Search (CRIS)")
 st.markdown("### The Outliers")
 st.markdown("#### Problem Statement 4: AI Conversational Search and Recommendations")
-
 st.markdown("---")
 
 col1, col2 = st.columns(2)
@@ -36,7 +35,7 @@ with col1:
 with col2:
     st.markdown(
         """
-        #### 💬 Page 2: Recommender Demo
+        #### 💬 Page 2: Interactive Recommender Demo
         Test CRIS live in a conversational session:
         * **Interactive 10-turn dialogue interface**.
         * **Dynamic State Tracking (DST)** inspector displaying parsed slots.
@@ -44,7 +43,7 @@ with col2:
         * **Cross-Encoder scores** and **Attribute Entropy distributions**.
         """
     )
-    if st.button("Go to Live Recommender Demo ➡️"):
+    if st.button("Go to Interactive Recommender Demo ➡️"):
         st.switch_page("pages/2_Recommender_Demo.py")
 
 st.markdown("---")
