@@ -12,6 +12,10 @@ variable rather than a code change:
 ``LLM_MODEL``                Model id as that provider spells it.
 ``LLM_TIMEOUT``              Per-attempt socket timeout, seconds. Default 20.
 ``LLM_MAX_ATTEMPTS``         Total tries including the first. Default 2.
+``LLM_MIN_INTERVAL``         Seconds enforced between call starts, process-wide.
+                              Default 0 (off). Set this against a tight TPM quota
+                              (e.g. Groq free tier) so requests never outrun the
+                              window in the first place.
 ``LLM_MAX_TOKENS``           Completion cap. Default 2048.
 ``LLM_USER_AGENT``           Overrides the default agent string.
 ``LLM_REASONING_EFFORT``     Sent only if set, e.g. ``low``. See caveat below.
@@ -62,6 +66,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -97,8 +102,45 @@ DEFAULT_USER_AGENT = "outliers-techjam-agent/1.0 (+python-urllib)"
 #: retrying them only burns the clock.
 _RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
-#: Backoff before a retry, seconds. Short: the harness is waiting on us.
+#: Backoff before a retry, seconds. Short: the harness is waiting on us. Used
+#: only when the provider does not tell us how long to wait (see
+#: ``_retry_after_seconds``); a 429 almost always does, and that figure is far
+#: more reliable than a fixed guess against a per-minute token quota.
 _RETRY_BACKOFF = 0.8
+
+#: Upper bound on a provider-suggested wait, seconds. Keeps a misparsed or
+#: unreasonably large suggestion from stalling the harness's per-turn budget.
+_MAX_SUGGESTED_WAIT = 30.0
+
+#: Groq (and OpenAI-compatible) 429 bodies spell the cooldown as prose, e.g.
+#: "Please try again in 19.035s". No header carries it, so this is the only
+#: source; capture the first number, unit optional.
+_RETRY_AFTER_RE = re.compile(r"try again in\s+([\d.]+)\s*(ms|s)?", re.IGNORECASE)
+
+
+def _retry_after_seconds(detail: str, headers: Any) -> Optional[float]:
+    """Best-effort wait time before the next attempt, or ``None``.
+
+    Prefers a standard ``Retry-After`` header when a gateway sends one, then
+    falls back to parsing the vendor's free-text message (Groq's shape today).
+    """
+    header_value = None
+    try:
+        header_value = headers.get("Retry-After") if headers is not None else None
+    except AttributeError:
+        header_value = None
+    if header_value:
+        try:
+            return min(_MAX_SUGGESTED_WAIT, max(0.0, float(header_value)))
+        except (TypeError, ValueError):
+            pass
+    match = _RETRY_AFTER_RE.search(detail or "")
+    if not match:
+        return None
+    value = float(match.group(1))
+    if (match.group(2) or "").lower() == "ms":
+        value /= 1000.0
+    return min(_MAX_SUGGESTED_WAIT, max(0.0, value))
 
 
 # --------------------------------------------------------------------------
@@ -165,6 +207,35 @@ class _UsageMeter:
 
 
 _METER = _UsageMeter()
+
+
+class _Throttle:
+    """Serializes calls with a minimum gap, so a tight TPM quota clears
+    between requests instead of only being discovered via 429s.
+
+    Reactive backoff (``_retry_after_seconds``) still helps once the quota is
+    exceeded, but a small free-tier quota (e.g. Groq's 8000 TPM against
+    ~2000-token turns) can stay saturated indefinitely if requests keep
+    landing faster than the window drains. Set via ``LLM_MIN_INTERVAL``,
+    seconds between call starts; 0 (default) disables it.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def wait(self, min_interval: float) -> None:
+        if min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next_at - now
+            self._next_at = max(now, self._next_at) + min_interval
+        if delay > 0:
+            time.sleep(delay)
+
+
+_THROTTLE = _Throttle()
 
 
 def drain_usage() -> Dict[str, int]:
@@ -334,8 +405,11 @@ def call_json(
         },
     )
 
+    _THROTTLE.wait(_env_float("LLM_MIN_INTERVAL", 0.0))
+
     last_error = "unexpected"
     for attempt in range(1, attempts + 1):
+        wait_seconds = None
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 raw = response.read().decode("utf-8", errors="replace")
@@ -352,6 +426,7 @@ def call_json(
             LOGGER.warning("LLM HTTP %s on attempt %s/%s: %s", error.code, attempt, attempts, detail)
             if error.code not in _RETRY_STATUS:
                 break
+            wait_seconds = _retry_after_seconds(detail, getattr(error, "headers", None))
         except urllib.error.URLError as error:
             # URLError wraps socket.timeout, DNS failure, refused connection.
             last_error = "timeout" if isinstance(error.reason, TimeoutError) else "network"
@@ -364,7 +439,7 @@ def call_json(
             LOGGER.warning("LLM unexpected failure on attempt %s/%s: %r", attempt, attempts, error)
             break
         if attempt < attempts:
-            time.sleep(_RETRY_BACKOFF * attempt)
+            time.sleep(wait_seconds if wait_seconds is not None else _RETRY_BACKOFF * attempt)
 
     return LLMResult(error=last_error)
 
