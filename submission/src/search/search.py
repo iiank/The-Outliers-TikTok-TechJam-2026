@@ -12,9 +12,8 @@ from embed.store import load_store
 logger = logging.getLogger(__name__)
 
 ALLOWED_ATTRIBUTES: Set[str] = {"category", "material", "color", "size", "style", "brand", "budget", "feature", "use_case", "other",}
-# NOTE: Need to redefine this list with rationale
-DEFAULT_ATTRIBUTE_PRIORITY: List[str] = ["material", "color", "size", "brand", "style", "feature", "use_case", "budget",]
-
+# Fallback Default if attribute is not provided, based on frequency count of attributes in catalog
+DEFAULT_ATTRIBUTE_PRIORITY: List[str] = ["material", "feature", "color", "style", "size", "use_case", "budget", "brand",]
 """
 HARD FILTERING
 """
