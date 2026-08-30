@@ -96,7 +96,7 @@ def behavior_for(scenario: str, card: dict, rng: random.Random) -> dict:
 
 
 def load_jsonl(path: str | Path) -> list[dict]:
-    with Path(path).open(encoding="utf-8-sig") as handle:
+    with Path(path).open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
 
 
