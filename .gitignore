@@ -30,3 +30,5 @@ submission/src/generation/tune_preference_tag.py
 
 # embed
 artifacts/
+public_set_5.jsonl
+results_5.json

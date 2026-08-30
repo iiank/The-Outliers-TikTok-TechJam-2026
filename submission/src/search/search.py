@@ -265,5 +265,5 @@ def search(state: Any) -> Tuple[List[str], Optional[str]]:
     global _PIPELINE_INSTANCE
     if _PIPELINE_INSTANCE is None:
         _PIPELINE_INSTANCE = SearchPipeline()
-    candidates, ask_attribute, _diagnostics = _PIPELINE_INSTANCE.search(state)
-    return candidates, ask_attribute
+    candidates, ask_attribute, diagnostics = _PIPELINE_INSTANCE.search(state)
+    return candidates, ask_attribute, diagnostics
