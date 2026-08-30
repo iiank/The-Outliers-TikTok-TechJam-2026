@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import random
 import re
@@ -9,7 +10,14 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
-from starter.agent import Agent
+# TEMPORARY: swapped from `starter.agent.Agent` (weak BM25 baseline) to the
+# real submission entrypoint for local testing. Revert to
+# `from starter.agent import Agent` when done.
+_agent_path = Path(__file__).resolve().parent.parent / "submission" / "agent.py"
+_agent_spec = importlib.util.spec_from_file_location("participant_agent", _agent_path)
+_agent_module = importlib.util.module_from_spec(_agent_spec)
+_agent_spec.loader.exec_module(_agent_module)
+Agent = _agent_module.Agent
 
 
 MAX_TURNS = 10
@@ -303,7 +311,11 @@ def main() -> None:
     args = parser.parse_args()
     samples = load_jsonl(args.dataset)
     catalog_ids, categories, products = catalog_index(args.catalog)
-    result = evaluate(Agent(args.catalog), samples, catalog_ids, categories, products)
+    # NOTE: the real Agent takes no constructor args -- it hardcodes
+    # "data/catalog.jsonl" internally (submission/src/search/search.py), so
+    # --catalog only affects this script's own ground-truth indexing above,
+    # not what the agent itself searches against.
+    result = evaluate(Agent(), samples, catalog_ids, categories, products)
     Path(args.output).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in result.items() if key != "sessions"}, indent=2))
 

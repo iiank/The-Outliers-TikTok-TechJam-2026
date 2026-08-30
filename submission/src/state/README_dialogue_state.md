@@ -8,7 +8,6 @@ reads. One function reads the words. Everything else works from the object.
 | -------------------------------------------- | ----------------------------------------------- | ------------ |
 | [dialogue_state.py](dialogue_state.py)       | Holds the state, applies changes                | no           |
 | [llm_extractor.py](llm_extractor.py)         | Words to slots and buying/browsing, in one call | yes          |
-| [context_distiller.py](context_distiller.py) | History to what we trust                        | no           |
 | [llm_client.py](llm_client.py)               | Shared HTTP plumbing                            | yes          |
 
 
@@ -27,7 +26,7 @@ independent calls for two independent questions.
 | ------ | --------- | ----------------------------------------------------------------- |
 | I. Intent Routing & Hybrid Pipeline | yes | `state.intent` (`"buying"`/`"browsing"`) is set once per turn by the joint extraction call and read directly by `search.py`'s RRF weighting — this module is the source of the routing signal, not the routing itself. |
 | II. Dialog Strategy | yes, this is the state machine | Information Accumulation is additive multi-value slots (Phase 2, step 3). Intent Override is the named-retraction path plus the structural single-value-slot check, surfaced as `conflicts_with_previous` and `history.override_turns`. |
-| III. Self-Evolution | yes, two ways | (a) `context_distiller.py`'s `session_summary` distills the turn history into `carry_forward`/`profile_corroboration` — within-session only, explicitly not cross-session memory (see Phase 3). (b) `DialogueState.attribute_refusals` tracks how many turns running an attribute has been asked without being answered or declined, consumed by `generation/weighted_entropy.py`'s `HARD_REFUSAL_LIMIT` to stop asking about it — the adaptive-orchestration piece: the agent's own questioning strategy changes based on how the conversation has gone. |
+| III. Self-Evolution | yes | `DialogueState.attribute_refusals` tracks how many turns running an attribute has been asked without being answered or declined, consumed by `generation/weighted_entropy.py`'s `HARD_REFUSAL_LIMIT` to stop asking about it — the adaptive-orchestration piece: the agent's own questioning strategy changes based on how the conversation has gone. |
 | IV. Evaluation Matrix | no | This module has no metrics logic; Hit Rate/MRR/MTTC live in `evaluator/`. It only supplies the state those metrics are computed against. |
 
 ---
@@ -43,9 +42,7 @@ Phase 1  extract_slots()    words  ->  {"category": ["boots"], ..., "intent": "b
    |
 Phase 2  update()           slots + intent  ->  new DialogueState
    |
-   +--> Phase 3  distill()          ->  {"short_term", "session_summary"}
-   |
-Phase 4  record_ask(), record_recommendations(), drain_usage()
+Phase 3  record_ask(), record_recommendations(), drain_usage()
 ```
 
 ---
@@ -227,107 +224,7 @@ The old state is never modified, so you can keep it and compare.
 
 
 
-### Phase 3: distill the history
-
-**What it does:** works out which constraints to trust. No LLM call.
-
-
-|          |                                                                                          |
-| -------- | ---------------------------------------------------------------------------------------- |
-| **In**   | the tracker's incremental history summary, plus the current state                        |
-| **Does** | reads a handful of small dicts the tracker already maintains — no scan over turn history |
-| **Out**  | `{"short_term": ..., "session_summary": ...}`                                            |
-
-
-Two very different things come back, and the split is what to read *now* versus what to
-carry forward *for the rest of this session*:
-
-- `short_term` is a snapshot of right now. It changes every turn, in lockstep with
-`session_profile` — it's the same information, just compressed and ordered for a
-ranking prompt instead of shaped for `update()` to write to.
-- `session_summary` is a judgement about the session's *arc so far*, not this one
-turn: has the customer contradicted themselves anywhere, does what they've actually
-said support the profile the harness handed you, and — bundled for convenience — what
-should the rest of this session keep biasing toward. It is **not** cross-session
-memory: `reset_request` gives no identifier linking two sessions for the same
-customer, so nothing written here could ever be read back on a future session. Despite
-the name, nothing here outlives this one session.
-
-```python
-context = distill(tracker.get_history_summary(session_id), state)
-```
-
-**Example** — continuing the running example, still turn 1 (everything is freshly stated,
-so every constraint has `revisions=0` and `turns_held=1`):
-
-```python
-{
-  "schema_version": 4, "session_id": "sess-42", "turn": 1, "turns_observed": 1,
-  "short_term": {
-    "constraints": [
-      {"attribute": "budget", "values": ["<=120"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
-      {"attribute": "category", "values": ["hiking boots"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
-      {"attribute": "color", "values": ["black"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0},
-      {"attribute": "feature", "values": ["waterproof"], "first_seen_turn": 1, "last_touched_turn": 1, "turns_held": 1, "revisions": 0}
-    ],
-    "avoid": [],
-    "unstable_attributes": [],
-    "focus_attributes": ["budget", "category", "color", "feature"],
-    "digest": "Wants: budget=<=120; category=hiking boots; color=black; feature=waterproof. Just changed: budget, category, color, feature."
-  },
-  "session_summary": {
-    "override_turns": [],
-    "profile_corroboration": {"confirmed": [], "unobserved": ["road running", "comfort"]},
-    "carry_forward": {
-      "prefer": ["hiking boots", "black", "<=120", "waterproof"],
-      "avoid": [], "indifferent_attributes": [], "confirmed_tags": [], "led_with": "budget"
-    }
-  }
-}
-```
-
-`profile_corroboration` puts both tags in `unobserved` here — the customer hasn't said
-anything about running or comfort yet, so the aggregate profile's prior is not yet
-confirmed by this session. That would move to `confirmed` the moment either word shows
-up in something the customer actually says. That is the kind of judgement `short_term`
-cannot make on its own: it only knows the current slots, not whether those slots
-corroborate a prior.
-
-`short_term` fields, all recomputed from scratch every turn:
-
-
-| Field                 | What it adds that the raw state cannot                                                                                                                                                                                                                                                       |
-| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `constraints`         | every filled slot, with `first_seen_turn`, `last_touched_turn`, `turns_held`, and `revisions` — plain facts, sorted alphabetically by attribute for a deterministic order. No score: a consumer that wants to prioritize one constraint over another computes that itself from these fields. |
-| `avoid`               | each rejected value with the slot it came from and the turn it was dropped                                                                                                                                                                                                                   |
-| `unstable_attributes` | slots the customer has already rewritten (`revisions > 0`)                                                                                                                                                                                                                                   |
-| `focus_attributes`    | what changed this turn. On an override turn, this is what to weight up.                                                                                                                                                                                                                      |
-| `digest`              | all of the above as one line of text                                                                                                                                                                                                                                                         |
-
-Not included here: a separate `declined_attributes`/`open_attributes` pair used
-to be exposed on `short_term`, but nothing outside this file ever read either
-one — `state.missing_attributes()` and `no_preference_attributes(profile)`
-already give any consumer that needs them directly, so the duplicate fields
-were removed rather than kept as unused surface area. `digest`'s "No
-preference on: ..." line still reflects declined attributes; it just computes
-them locally instead of reading them back off the dict.
-
-`session_summary` fields, each a pattern over the session rather than a fact about
-this one turn:
-
-
-| Field                   | What it's a judgement about                                                                                                                                                                                                                      |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `override_turns`        | has the customer contradicted an earlier stated preference, and on which turns                                                                                                                                                                   |
-| `profile_corroboration` | does anything the customer has actually said this session support the `preference_tags` the harness handed you at `reset()`                                                                                                                      |
-| `carry_forward`         | one bundled view of what to keep biasing toward for the rest of *this* session — `prefer` / `avoid` / `indifferent_attributes` / `confirmed_tags` — so a caller doesn't re-derive it from `session_profile` and `rejected` separately every turn |
-
-
----
-
-
-
-### Phase 4: save what you are about to send
+### Phase 3: save what you are about to send
 
 **What it does:** lets the next turn understand the reply.
 
@@ -369,7 +266,6 @@ Skipping it costs accuracy, not correctness.
 ```python
 from state.dialogue_state import DialogueStateTracker
 from state.llm_extractor import extract_slots
-from state.context_distiller import distill
 from state.llm_client import drain_usage
 
 tracker = DialogueStateTracker(extractor=extract_slots)
@@ -379,9 +275,8 @@ state = tracker.reset(session_id, user_profile)
 
 # Agent.respond
 state = tracker.update(user_message, tracker.get_state(session_id), turn=turn)
-context = distill(tracker.get_history_summary(session_id), state)
 
-# ... your retrieval and rerank read state.to_dict(), context["short_term"], state.intent ...
+# ... your retrieval and rerank read state.to_dict(), state.intent ...
 
 tracker.record_ask(state, ask_attribute)
 tracker.record_recommendations(state, [r["parent_asin"] for r in recommendations])
@@ -531,18 +426,18 @@ Every one of these works on a plain dict, so nothing needs to import
 `DialogueState`.
 
 
-| Your module         | Call                                                                         | You get                                                                                                                                                 |
-| ------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| numeric filter      | `budget_bounds(profile)`                                                     | `{"min_price", "max_price", "target_price"}`, floats or `None`. All `None` means no budget, so skip filtering. Decodes `"<=120"` so you never parse it. |
-| BM25 and dense      | `state.query_terms()`                                                        | every positive value in one flat list                                                                                                                   |
-| RRF weighting       | `state.intent`                                                               | `"buying"`, `"browsing"`, or `None`                                                                                                                     |
-| RRF on override     | `state.conflicts_with_previous`, `context["short_term"]["focus_attributes"]` | that an override happened, and which slots changed                                                                                                      |
-| negative filtering  | `context["short_term"]["avoid"]`                                             | rejected values with the slot each came from                                                                                                            |
-| entropy questions   | `state.missing_attributes()`                                                 | askable slots only, already excluding filled and permanently declined ones                                                                              |
-| entropy priors      | `context["session_summary"]["profile_corroboration"]`                        | tags split into `confirmed` and `unobserved`                                                                                                            |
-| conflict resolution | `context["short_term"]["constraints"]`                                       | `first_seen_turn`/`turns_held`/`revisions` per attribute, for when two stated constraints disagree                                                      |
-| reranker            | `state.to_dict()`                                                            | the raw slots, or `context["short_term"]["digest"]` for a denser version                                                                                |
-| agent skeleton      | `record_ask`, `record_recommendations`, `drain_usage`                        | call all three at the end of each turn                                                                                                                  |
+| Your module         | Call                                                              | You get                                                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| numeric filter      | `budget_bounds(profile)`                                          | `{"min_price", "max_price", "target_price"}`, floats or `None`. All `None` means no budget, so skip filtering. Decodes `"<=120"` so you never parse it. |
+| BM25 and dense      | `state.query_terms()`                                             | every positive value in one flat list                                                                                                                   |
+| RRF weighting       | `state.intent`                                                    | `"buying"`, `"browsing"`, or `None`                                                                                                                     |
+| RRF on override     | `state.conflicts_with_previous`, `tracker.get_history_summary(session_id)["last_turn_attributes"]` | that an override happened, and which slots changed                                                                                                      |
+| negative filtering  | `state.session_profile["rejected"]`                                | rejected values (mixed with `no_preference:<attr>` markers — filter those out with `no_preference_attributes()` if you only want plain negative terms) |
+| entropy questions   | `state.missing_attributes()`                                      | askable slots only, already excluding filled and permanently declined ones                                                                              |
+| entropy priors      | `state.user_profile.get("preference_tags")`                       | the raw profile's tags, unconfirmed against this session (there's no built-in "which tags has the customer actually backed up" split — that would need to be computed by the consumer)                                                                                                            |
+| conflict resolution | `tracker.get_history_summary(session_id)`                         | `value_first_seen`/`attribute_revisions` per attribute, for when two stated constraints disagree                                                      |
+| reranker            | `state.to_dict()`                                                  | the raw slots                                                                                                                                            |
+| agent skeleton      | `record_ask`, `record_recommendations`, `drain_usage`              | call all three at the end of each turn                                                                                                                  |
 
 
 Entropy rules map onto what already exists:
@@ -617,7 +512,7 @@ stay in the state.
 
 ## Tests
 
-46 tests, no network and no credentials needed. The LLM transport is tested by
+40 tests, no network and no credentials needed. The LLM transport is tested by
 replacing `urllib.request.urlopen`, so the real request body and the real parsing
 path are both covered.
 

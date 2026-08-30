@@ -23,10 +23,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
-from src.agent.intent_classifier import IntentClassifier, LLMIntentClassifier
-from src.agent.message_builder import LLMMessageBuilder, MessageBuilder
-from src.state.dialogue_state import DialogueState, DialogueStateTracker
-from src.search import search
+from agent.intent_classifier import IntentClassifier, LLMIntentClassifier
+from agent.message_builder import LLMMessageBuilder, MessageBuilder
+from state.dialogue_state import DialogueState, DialogueStateTracker
+from search import search
 
 __all__ = ["Agent", "StateTracker"]
 
