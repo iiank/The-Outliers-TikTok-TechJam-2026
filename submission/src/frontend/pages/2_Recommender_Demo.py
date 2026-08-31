@@ -278,8 +278,9 @@ with col_inspect:
         dyn_state = diagnostics.get("dynamic_state") or diagnostics.get("state", {})
         session_profile = dyn_state.get("session_profile", {})
         detected_intent = dyn_state.get("intent", "buying")
-
-        st.caption(f"Inferred Intent: `{detected_intent.upper()}`")
+        
+        if detected_intent:
+            st.caption(f"Inferred Intent: `{detected_intent.upper()}`")
 
         active_slots = {
             k: v for k, v in session_profile.items()
