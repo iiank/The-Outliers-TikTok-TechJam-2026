@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from agent.intent_classifier import LLMIntentClassifier, RegexIntentClassifier
 from agent.message_builder import LLMMessageBuilder, TemplateMessageBuilder
@@ -35,16 +36,20 @@ class FakeStateTracker:
 
 class FakeSearcher:
     """Stands in for the retrieval teammate's black box in these tests only --
-    not shipped as part of the agent module."""
+    not shipped as part of the agent module. Matches the real module-level
+    ``search(state) -> (candidates, ask_attribute, diagnostics)`` contract, and
+    is wired in via ``patch("agent.shopping_agent.search", ...)`` rather than
+    an injected attribute -- ``Agent`` calls the imported function directly,
+    it does not hold a ``self.searcher``."""
 
     def __init__(self, candidates: list[str], ask_attribute: str | None) -> None:
         self.candidates = candidates
         self.ask_attribute = ask_attribute
-        self.calls: list[tuple[DialogueState, str, int]] = []
+        self.calls: list[DialogueState] = []
 
-    def search(self, state: DialogueState, mode: str, top_k: int):
-        self.calls.append((state, mode, top_k))
-        return self.candidates[:top_k], self.ask_attribute
+    def search(self, state: DialogueState):
+        self.calls.append(state)
+        return self.candidates, self.ask_attribute, {}
 
 
 class FakeIntentClassifier:
@@ -66,19 +71,19 @@ class FakeMessageBuilder:
 class AgentWiringTests(unittest.TestCase):
     """Agent.respond() plumbing, fully faked -- no network, no catalog file."""
 
-    def _agent(self, ask_attribute: str | None = "material") -> tuple[Agent, FakeSearcher]:
-        searcher = FakeSearcher(["A", "B", "C"], ask_attribute)
+    def _agent(self, ask_attribute: str | None = "material", candidates: list[str] | None = None) -> tuple[Agent, FakeSearcher]:
+        searcher = FakeSearcher(candidates if candidates is not None else ["A", "B", "C"], ask_attribute)
         agent = Agent.__new__(Agent)  # bypass __init__
         agent.state_tracker = FakeStateTracker()
-        agent.searcher = searcher
         agent.intent_classifier = FakeIntentClassifier("buy")
         agent.message_builder = FakeMessageBuilder()
         return agent, searcher
 
     def test_respond_shape_matches_contract(self) -> None:
-        agent, _ = self._agent()
+        agent, searcher = self._agent()
         agent.reset("s1", {"summary": "test"})
-        response = agent.respond("s1", "I need a wool sweater", turn=1, top_k=10)
+        with patch("agent.shopping_agent.search", side_effect=searcher.search):
+            response = agent.respond("s1", "I need a wool sweater", turn=1, top_k=10)
         self.assertIsInstance(response["message"], str)
         self.assertEqual(response["ask_attribute"], "material")
         self.assertEqual(response["recommendations"], [{"parent_asin": "A"}, {"parent_asin": "B"}, {"parent_asin": "C"}])
@@ -86,33 +91,35 @@ class AgentWiringTests(unittest.TestCase):
         self.assertIn("completion_tokens", response["usage"])
 
     def test_respond_truncates_recommendations_to_top_k(self) -> None:
-        agent, _ = self._agent()
+        agent, searcher = self._agent()
         agent.reset("s1", {})
-        response = agent.respond("s1", "hello", turn=1, top_k=2)
+        with patch("agent.shopping_agent.search", side_effect=searcher.search):
+            response = agent.respond("s1", "hello", turn=1, top_k=2)
         self.assertEqual(len(response["recommendations"]), 2)
 
     def test_ask_attribute_none_when_searcher_signals_nothing_left(self) -> None:
-        agent, _ = self._agent(ask_attribute=None)
+        agent, searcher = self._agent(ask_attribute=None)
         agent.reset("s1", {})
-        response = agent.respond("s1", "hello", turn=1, top_k=10)
+        with patch("agent.shopping_agent.search", side_effect=searcher.search):
+            response = agent.respond("s1", "hello", turn=1, top_k=10)
         self.assertIsNone(response["ask_attribute"])
         self.assertEqual(response["message"], "presenting results")
 
     def test_intent_classification_runs_before_search_and_state_update(self) -> None:
         agent, searcher = self._agent()
         agent.reset("s1", {})
-        agent.respond("s1", "I need a size 10 boot", turn=1, top_k=10)
+        with patch("agent.shopping_agent.search", side_effect=searcher.search):
+            agent.respond("s1", "I need a size 10 boot", turn=1, top_k=10)
         # classify() saw the pre-update state (turn 0, from reset), proving it
         # ran on the prior state, not the state produced by this turn's update.
         classify_calls = agent.intent_classifier.calls
         self.assertEqual(len(classify_calls), 1)
         _, state_seen = classify_calls[0]
         self.assertEqual(state_seen.turn, 0)
-        # search() ran against the *updated* state (turn 1).
-        search_state, mode, top_k = searcher.calls[0]
-        self.assertEqual(search_state.turn, 1)
-        self.assertEqual(mode, "buy")
-        self.assertEqual(top_k, 10)
+        # search() ran against the *updated* state (turn 1). It takes no mode
+        # argument -- SearchPipeline reads intent mode off state.intent itself.
+        self.assertEqual(len(searcher.calls), 1)
+        self.assertEqual(searcher.calls[0].turn, 1)
 
 
 class RegexIntentClassifierTests(unittest.TestCase):
@@ -237,13 +244,14 @@ class AgentOfflineSwapTests(unittest.TestCase):
 
     def test_offline_swap_runs_end_to_end(self) -> None:
         agent = Agent(
-            searcher=FakeSearcher(["A", "B"], "material"),
             intent_classifier=RegexIntentClassifier(),
             message_builder=TemplateMessageBuilder(),
         )
         self.assertIsInstance(agent.state_tracker, DialogueStateTracker)
         agent.reset("s1", {"summary": "test"})
-        response = agent.respond("s1", "I need a wool sweater", turn=1, top_k=10)
+        searcher = FakeSearcher(["A", "B"], "material")
+        with patch("agent.shopping_agent.search", side_effect=searcher.search):
+            response = agent.respond("s1", "I need a wool sweater", turn=1, top_k=10)
         self.assertEqual(response["message"], "Do you have a material preference?")
         self.assertEqual(response["ask_attribute"], "material")
         self.assertEqual(response["recommendations"], [{"parent_asin": "A"}, {"parent_asin": "B"}])

@@ -226,6 +226,15 @@ class AskState:
         return _REFUSAL_DECAY ** self.refusals.get(attribute, 0)
 
 
+#: Attributes that can be declined/fatigued out of asking, beyond the
+#: table-backed ``ASKABLE_ATTRIBUTES``. ``feature`` has its own bespoke
+#: scoring path in ``rank_attributes`` (no fixed vocab table -- open text),
+#: but that path still gates on ``state.banned``, so it must be trackable
+#: here too or a declined/fatigued ``feature`` can never actually stop being
+#: asked about (it would keep re-scoring at its fixed baseline forever).
+_TRACKABLE_ATTRIBUTES = set(ASKABLE_ATTRIBUTES) | {"feature"}
+
+
 def ask_state_from_profile(
     session_profile: Mapping[str, Any],
     previous_ask_attribute: str = "",
@@ -233,15 +242,15 @@ def ask_state_from_profile(
 ) -> "AskState":
     profile = dict(session_profile or {})
     confirmed = {key for key in ASKABLE_ATTRIBUTES if profile.get(key)}
-    banned = set(_no_preference(profile)) & set(ASKABLE_ATTRIBUTES)
+    banned = set(_no_preference(profile)) & _TRACKABLE_ATTRIBUTES
 
     counts = dict(refusals or {})
     asked = (previous_ask_attribute or "").strip()
-    if asked and asked in ASKABLE_ATTRIBUTES and asked not in confirmed and asked not in banned:
+    if asked and asked in _TRACKABLE_ATTRIBUTES and asked not in confirmed and asked not in banned:
         counts[asked] = counts.get(asked, 0) + 1
 
     fatigued = {attr for attr, n in counts.items() if n >= HARD_REFUSAL_LIMIT}
-    banned = banned | (fatigued & set(ASKABLE_ATTRIBUTES))
+    banned = banned | (fatigued & _TRACKABLE_ATTRIBUTES)
 
     return AskState(confirmed=confirmed, banned=banned, refusals=counts)
 

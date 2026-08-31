@@ -75,7 +75,7 @@ class Agent:
         mode = self.intent_classifier.classify(user_message, prior_state)
         state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model
 
-        candidates, ask_attribute = search(state)
+        candidates, ask_attribute, _diagnostics = search(state)
         candidates = candidates[:top_k]
         self.state_tracker.record_recommendations(state, candidates)  # BOUNDARY(state)
 

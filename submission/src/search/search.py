@@ -8,6 +8,7 @@ from retrieval.bm25 import BM25Index
 from retrieval.catalog_ids import CatalogIndex
 from retrieval.pipeline import Retriever
 from embed.store import load_store
+from state.dialogue_state import no_preference_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -243,12 +244,19 @@ class SearchPipeline:
             needs_heuristic_fallback = True
 
         if selected_attribute is None and needs_heuristic_fallback:
+            # Skip attributes the customer already answered *and* ones they
+            # explicitly declined -- previously this only checked "filled",
+            # so once every priority attribute was both answered and refused,
+            # the final `selected_attribute = "feature"` below re-asked
+            # `feature` forever regardless of whether it was already known
+            # and declined, burning every remaining turn on a dead question.
+            declined = set(no_preference_attributes(session_profile))
             for attr in DEFAULT_ATTRIBUTE_PRIORITY:
-                if not session_profile.get(attr):
+                if not session_profile.get(attr) and attr not in declined:
                     selected_attribute = attr
                     break
-            if selected_attribute is None:
-                selected_attribute = "feature"
+            # Every priority attribute is either filled or declined: nothing
+            # left worth asking, so stop asking and just present results.
 
         return top_10_asins, selected_attribute, diagnostics
 
@@ -257,7 +265,7 @@ class SearchPipeline:
 # -----------------------------------------------------------------------------
 _PIPELINE_INSTANCE: Optional[SearchPipeline] = None
 
-def search(state: Any) -> Tuple[List[str], Optional[str]]:
+def search(state: Any) -> Tuple[List[str], Optional[str], Dict[str, Any]]:
     """
     Overarching search API called by agent.py.
     Maintains persistent memory instances of models and catalog.

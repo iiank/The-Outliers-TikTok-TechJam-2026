@@ -21,7 +21,7 @@ def truncate_categories(categories: list[str]) -> str:
     tail = filtered[-2:] if len(filtered) >= 2 else filtered
     return " > ".join(tail)
 
-def truncate_features(features: list[str], max_bullets: int = 2) -> str:
+def truncate_features(features: list[str], max_bullets: int = 4) -> str:
     if not features:
         return ""
     extracted = []
@@ -52,7 +52,7 @@ with open("catalog.jsonl", "r", encoding="utf-8") as infile, open("reranker_cata
         avg_rating = product.get("average_rating")
         raw_categories = product.get("categories")
         leaf_categories = truncate_categories(raw_categories)
-        top_features = truncate_features(product.get("features"), 2)
+        top_features = truncate_features(product.get("features"))
 
         output = {
             "parent_asin": product.get("parent_asin"),

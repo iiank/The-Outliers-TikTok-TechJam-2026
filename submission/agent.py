@@ -23,7 +23,7 @@ from agent.message_builder import (  # noqa: E402
 )
 from agent.shopping_agent import Agent as _ShoppingAgent  # noqa: E402
 from state.dialogue_state import DialogueStateTracker  # noqa: E402
-from state.llm_extractor import extract_slots  # noqa: E402
+from state.regex_extractor import extract_slots  # noqa: E402
 
 __all__ = ["Agent"]
 
