@@ -72,8 +72,8 @@ __all__ = [
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
-DEFAULT_MODEL = "openai/gpt-oss-120b"
+DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_MAX_ATTEMPTS = 2
 
