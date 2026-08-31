@@ -1,10 +1,8 @@
-"""Schema-constrained LLM transport for the TechJam shopping agent.
+"""Schema-constrained LLM client for the TechJam shopping agent.
 
-The transport behind :mod:`state.llm_extractor`'s joint intent-and-slot call.
-It speaks the OpenAI-compatible
-``POST {base_url}/chat/completions`` shape, which every free-tier endpoint the
-team is likely to use already exposes, so the provider is an environment
-variable rather than a code change:
+Used by ``state.llm_extractor`` for joint intent and slot extraction. Calls
+OpenAI-compatible ``POST {base_url}/chat/completions`` endpoints so providers
+can be changed through environment variables without modifying code.
 
 ===========================  ================================================
 ``LLM_BASE_URL``             API root, no trailing ``/chat/completions``.
@@ -21,44 +19,34 @@ variable rather than a code change:
 ``LLM_REASONING_EFFORT``     Sent only if set, e.g. ``low``. See caveat below.
 ===========================  ================================================
 
-``LLM_REASONING_EFFORT=low`` cuts completion tokens ~60% on gpt-oss but was
-measured emitting ``"< =120"`` for a budget instead of ``"<=120"``. ``budget_bounds``
-tolerates that now, but treat low effort as a throughput lever to verify, not a
-free win.
+Low reasoning effort can reduce completion-token usage but may degrade
+structured values. Verify extraction quality before enabling it.
 
-Verified shapes for the defaults, and the drop-in alternatives::
+Example providers::
 
-    # Groq (the built-in default). Free tier is 8000 tokens/min, 1000 req/min.
+    # Groq
     LLM_BASE_URL=https://api.groq.com/openai/v1
     LLM_MODEL=openai/gpt-oss-120b
 
-    # Google Gemini, OpenAI-compatibility endpoint
+    # Google Gemini OpenAI-compatible endpoint
     LLM_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
     LLM_MODEL=gemini-2.0-flash
 
-Two invariants the callers depend on:
+Caller guarantees:
 
-* **Constrained output only.** Every request sends
-  ``response_format={"type": "json_schema", ..., "strict": True}``, and the
-  reply is read with :func:`json.loads` and nothing else. There is no prose
-  salvage path, no fence stripping, no key repair. A provider that ignores
-  ``response_format`` therefore fails cleanly instead of feeding half-parsed
-  guesses into the dialogue state. Keys outside the schema are dropped even if
-  the provider lets them through, so a caller can trust the key set absolutely.
-* **Never raises.** Timeouts, HTTP errors, malformed JSON, and missing
-  credentials all come back as ``LLMResult(data=None, error=...)``. The
-  competition harness counts an exception as a miss
-  (docs/competition_specification.md), so failure has to be a value.
+* Responses must match the requested JSON schema. Invalid or unconstrained
+  output fails rather than being repaired or inferred.
+* Transport and parsing failures return ``LLMResult(data=None, error=...)``
+  instead of raising, because evaluator exceptions count as misses.
+* Undeclared response keys are removed before data reaches dialogue state.
 
-Token accounting for the response ``usage`` field lives here too, because both
-callers return schema-constrained payloads with no room for it. Every call adds
-to a process-wide meter; the agent drains it once per turn:
+Token usage is accumulated process-wide and drained by the agent once per turn::
 
     from state.llm_client import drain_usage
     ...
     return {..., "usage": drain_usage()}
 
-Standard library only, matching the rest of the submission.
+Uses only the Python standard library.
 """
 
 from __future__ import annotations
@@ -89,41 +77,27 @@ DEFAULT_MODEL = "openai/gpt-oss-120b"
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_MAX_ATTEMPTS = 2
 
-#: Completion ceiling. Generous because the default model is a *reasoning*
-#: model: gpt-oss emits its chain of thought into the completion before the JSON
-#: object, so a ceiling sized for the JSON alone truncates mid-reasoning and the
-#: provider rejects the turn with ``json_validate_failed`` ("max completion
-#: tokens reached before generating a valid document"). 512 was enough for slot
-#: extraction and failed ~75% of intent classifications.
+# Reasoning models may consume completion tokens before producing the JSON
+# payload, so the limit must leave enough room for both reasoning and output.
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_USER_AGENT = "outliers-techjam-agent/1.0 (+python-urllib)"
 
-#: Transient statuses worth one more try. 400/401/404 are configuration bugs and
-#: retrying them only burns the clock.
+# Retry only transient failures
 _RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
-#: Backoff before a retry, seconds. Short: the harness is waiting on us. Used
-#: only when the provider does not tell us how long to wait (see
-#: ``_retry_after_seconds``); a 429 almost always does, and that figure is far
-#: more reliable than a fixed guess against a per-minute token quota.
+# Fallback retry delay when the provider does not specify one.
 _RETRY_BACKOFF = 0.8
 
-#: Upper bound on a provider-suggested wait, seconds. Keeps a misparsed or
-#: unreasonably large suggestion from stalling the harness's per-turn budget.
+# Cap provider-suggested delays to avoid stalling the evaluator.
 _MAX_SUGGESTED_WAIT = 30.0
 
-#: Groq (and OpenAI-compatible) 429 bodies spell the cooldown as prose, e.g.
-#: "Please try again in 19.035s". No header carries it, so this is the only
-#: source; capture the first number, unit optional.
+# Parse cooldowns such as "Please try again in 19.035s" from 429 responses.
 _RETRY_AFTER_RE = re.compile(r"try again in\s+([\d.]+)\s*(ms|s)?", re.IGNORECASE)
 
 
 def _retry_after_seconds(detail: str, headers: Any) -> Optional[float]:
-    """Best-effort wait time before the next attempt, or ``None``.
-
-    Prefers a standard ``Retry-After`` header when a gateway sends one, then
-    falls back to parsing the vendor's free-text message (Groq's shape today).
-    """
+    """Return the provider's suggested retry delay, if available."""
+    
     header_value = None
     try:
         header_value = headers.get("Retry-After") if headers is not None else None
@@ -150,17 +124,13 @@ def _retry_after_seconds(detail: str, headers: Any) -> Optional[float]:
 
 @dataclass(frozen=True)
 class LLMResult:
-    """One completed (or failed) call.
+    """Result of one LLM request.
 
     Attributes:
-        data: The parsed object, already filtered to the schema's declared keys.
-            ``None`` on any failure, which is the signal callers branch on.
-        prompt_tokens: Reported prompt tokens, 0 when the provider omits them.
-        completion_tokens: Reported completion tokens, 0 when omitted.
-        error: Short machine-readable failure tag, ``None`` on success. One of
-            ``no_credentials``, ``http_<status>``, ``network``, ``timeout``,
-            ``bad_json``, ``schema_mismatch``, ``empty_response``, or
-            ``unexpected``.
+        data: Schema-filtered response object, or ``None`` on failure.
+        prompt_tokens: Reported prompt tokens, or 0 when unavailable.
+        completion_tokens: Reported completion tokens, or 0 when unavailable.
+        error: Machine-readable failure code, or ``None`` on success.
     """
 
     data: Optional[Dict[str, Any]] = None
@@ -173,7 +143,7 @@ class LLMResult:
         return self.data is not None
 
     def usage(self) -> Dict[str, int]:
-        """This call's tokens in the contract's ``usage`` shape."""
+        """Return this request's token usage in the agent contract format."""
         return {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
@@ -186,7 +156,7 @@ class LLMResult:
 
 
 class _UsageMeter:
-    """Process-wide token counter, safe to touch from more than one thread."""
+    """Thread-safe process-wide token counter."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -210,15 +180,7 @@ _METER = _UsageMeter()
 
 
 class _Throttle:
-    """Serializes calls with a minimum gap, so a tight TPM quota clears
-    between requests instead of only being discovered via 429s.
-
-    Reactive backoff (``_retry_after_seconds``) still helps once the quota is
-    exceeded, but a small free-tier quota (e.g. Groq's 8000 TPM against
-    ~2000-token turns) can stay saturated indefinitely if requests keep
-    landing faster than the window drains. Set via ``LLM_MIN_INTERVAL``,
-    seconds between call starts; 0 (default) disables it.
-    """
+    """Enforce a process-wide minimum interval between request starts."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -239,17 +201,12 @@ _THROTTLE = _Throttle()
 
 
 def drain_usage() -> Dict[str, int]:
-    """Return tokens spent since the last drain, and reset the counter.
-
-    Call once per turn, right before building the response, so ``usage`` reports
-    that turn's cost. Both non-negative integers, so it satisfies the
-    ``usage`` sub-schema in docs/agent_api_contract.json as-is.
-    """
+    """Return accumulated token usage and reset the counter."""
     return _METER.drain()
 
 
 def reset_usage() -> None:
-    """Zero the counter, e.g. in ``Agent.reset`` or between test cases."""
+    """Reset accumulated token usage."""
     _METER.drain()
 
 
@@ -262,11 +219,7 @@ _WARN_LOCK = threading.Lock()
 
 
 def _warn_once(key: str, message: str) -> None:
-    """Log ``message`` the first time ``key`` is seen.
-
-    A missing key would otherwise be invisible: every turn just returns ``{}``
-    and the run looks like the old no-op stub.
-    """
+    """Log a warning only on its first occurrence."""
     with _WARN_LOCK:
         if key in _WARNED:
             return
@@ -294,15 +247,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 def string_array(enum: Optional[Iterable[str]] = None, description: str = "") -> Dict[str, Any]:
-    """A JSON-schema fragment for an array of strings.
-
-    Both callers want the same fragment repeatedly, so build it in one place.
+    """Build a JSON Schema fragment for an array of strings.
 
     Args:
-        enum: Restrict items to this set, for a field that names attributes
-            rather than free values.
-        description: Field-level instruction. Models follow these more reliably
-            than the same sentence buried in the system prompt.
+        enum: Optional allowed values for each array item.
+        description: Optional field-level schema description.
     """
     items: Dict[str, Any] = {"type": "string"}
     if enum is not None:
@@ -327,28 +276,19 @@ def call_json(
     max_tokens: Optional[int] = None,
     temperature: float = 0.0,
 ) -> LLMResult:
-    """Ask the model for one object matching ``schema``. Never raises.
+    """Request one schema-constrained JSON object without raising.
 
     Args:
-        system_prompt: The task rules. Kept identical across turns so a
-            provider with prompt caching can reuse it.
-        user_payload: The per-turn content. JSON is a good choice: it keeps the
-            utterance visually separate from the state context, which makes
-            prompt injection through a customer message much less likely to
-            read as an instruction.
-        schema: A JSON Schema **object** with ``properties``. Sent as-is under
-            ``strict: true``, so it needs ``additionalProperties: false`` and
-            every property listed in ``required``.
-        schema_name: Identifier for the schema; some providers require it.
-        max_tokens: Completion cap. Defaults to ``LLM_MAX_TOKENS``.
-        temperature: 0.0 by default. Extraction and classification should be
-            reproducible across runs; the evaluator is deterministic and a
-            wandering extractor makes local scores impossible to compare.
+        system_prompt: Stable task instructions sent as the system message.
+        user_payload: Per-turn input sent as the user message.
+        schema: Strict JSON Schema describing the expected object.
+        schema_name: Provider-facing identifier for the schema.
+        max_tokens: Optional completion-token limit.
+        temperature: Sampling temperature; defaults to deterministic extraction.
 
     Returns:
-        An :class:`LLMResult`. On success ``data`` holds only keys declared in
-        ``schema["properties"]``. Tokens are added to the shared meter whether
-        or not parsing succeeded, because a failed call still costs money.
+        ``LLMResult`` containing schema-filtered data or a failure code. Token
+        usage is recorded even when response parsing fails.
     """
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
@@ -372,10 +312,7 @@ def call_json(
         "temperature": temperature,
         "max_tokens": limit,
     }
-    # Reasoning models bill their chain of thought as completion tokens, which
-    # dominates cost and eats a per-minute token quota. Where a provider exposes
-    # a depth control, turning it down is the cheapest lever available. Sent only
-    # when set, since providers that do not know the field reject it.
+    
     effort = os.environ.get("LLM_REASONING_EFFORT", "").strip()
     if effort:
         payload["reasoning_effort"] = effort
@@ -416,25 +353,22 @@ def call_json(
             return _parse_envelope(raw, schema)
         except urllib.error.HTTPError as error:
             last_error = f"http_{error.code}"
-            # The body usually names the real problem (unsupported
-            # response_format, unknown model). Worth one log line.
             detail = ""
             try:
                 detail = error.read().decode("utf-8", errors="replace")[:400]
-            except Exception:  # pragma: no cover - best effort only
+            except Exception:
                 pass
             LOGGER.warning("LLM HTTP %s on attempt %s/%s: %s", error.code, attempt, attempts, detail)
             if error.code not in _RETRY_STATUS:
                 break
             wait_seconds = _retry_after_seconds(detail, getattr(error, "headers", None))
         except urllib.error.URLError as error:
-            # URLError wraps socket.timeout, DNS failure, refused connection.
             last_error = "timeout" if isinstance(error.reason, TimeoutError) else "network"
             LOGGER.warning("LLM %s on attempt %s/%s: %s", last_error, attempt, attempts, error.reason)
         except TimeoutError:
             last_error = "timeout"
             LOGGER.warning("LLM timeout on attempt %s/%s", attempt, attempts)
-        except Exception as error:  # pragma: no cover - defensive
+        except Exception as error:
             last_error = "unexpected"
             LOGGER.warning("LLM unexpected failure on attempt %s/%s: %r", attempt, attempts, error)
             break
@@ -445,11 +379,8 @@ def call_json(
 
 
 def _parse_envelope(raw: str, schema: Dict[str, Any]) -> LLMResult:
-    """Turn a chat-completions response body into an :class:`LLMResult`.
-
-    Records tokens before validating content, so a reply that parses badly is
-    still billed in the report.
-    """
+    """Parse and validate an OpenAI-compatible response envelope."""
+    
     try:
         envelope = json.loads(raw)
     except (ValueError, TypeError):
@@ -471,8 +402,6 @@ def _parse_envelope(raw: str, schema: Dict[str, Any]) -> LLMResult:
     try:
         payload = json.loads(content)
     except (ValueError, TypeError):
-        # A provider that ignored response_format lands here. Deliberately not
-        # salvaged: guessing at prose would put invented constraints into state.
         LOGGER.warning("LLM returned non-JSON content; is response_format json_schema supported?")
         return LLMResult(
             prompt_tokens=prompt_tokens,
@@ -503,12 +432,7 @@ def _parse_envelope(raw: str, schema: Dict[str, Any]) -> LLMResult:
 
 
 def _read_usage(usage: Any) -> tuple:
-    """Pull token counts out of a provider's ``usage`` block.
-
-    Most OpenAI-compatible endpoints use ``prompt_tokens``/``completion_tokens``;
-    a few report ``input_tokens``/``output_tokens``. Missing counts are 0 rather
-    than an error, since the contract only needs non-negative integers.
-    """
+    """Read token counts from common OpenAI-compatible usage formats."""
     if not isinstance(usage, dict):
         return 0, 0
 
@@ -523,11 +447,7 @@ def _read_usage(usage: Any) -> tuple:
 
 
 def _read_content(envelope: Dict[str, Any]) -> Optional[str]:
-    """Extract the first choice's message text, or ``None``.
-
-    Tolerates the list-of-parts content shape some gateways emit, since that is
-    a transport detail rather than a model guess.
-    """
+    """Return the first choice's message text, if present."""
     choices = envelope.get("choices")
     if not isinstance(choices, list) or not choices:
         return None

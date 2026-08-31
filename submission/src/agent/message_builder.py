@@ -1,34 +1,28 @@
-"""Natural-language response generation.
+"""Generate customer-facing responses.
 
-The evaluator scores ``ask_attribute`` and ``recommendations``; ``message``
-content is never inspected by the scripted customer-simulator (see the plan
-doc). It still matters for the demo and any live/interactive use, so the
-default path calls an LLM to phrase it naturally from ``ask_attribute``,
-``mode``, and the session state.
+The default builder uses an LLM to phrase responses from the requested
+attribute and session state.
 
-``TemplateMessageBuilder`` is a complete, tested, offline alternative --
-swap it in with ``Agent(message_builder=TemplateMessageBuilder())``. There's
-no automatic fallback: an ``LLMMessageBuilder`` API failure raises, same as
-any other ``respond()`` exception.
+Use ``TemplateMessageBuilder`` for deterministic offline output:
 
-CROSS-BOUNDARY POINTS IN THIS FILE:
+    Agent(message_builder=TemplateMessageBuilder())
 
-* ``BOUNDARY(state)`` -- the ``DialogueState`` import (type only) and, in
-  ``LLMMessageBuilder.build()``, the ``state.session_profile`` read: reads
-  data owned by the state teammate's ``DialogueState`` class.
-* ``BOUNDARY(external: Anthropic API)`` -- ``LLMMessageBuilder`` calls out to
-  the Anthropic Messages API over the network.
-* Deliberately NOT a boundary: ``candidates`` (the ``parent_asin`` list from
-  ``Searcher.search()``) is treated as opaque IDs here -- this module never
-  looks up catalog/product data for them. See the note on ``LLMMessageBuilder``
-  below for why.
+LLM failures propagate through ``respond()`` without an automatic fallback.
+
+Integration boundaries:
+
+* ``DialogueState`` is imported for typing, and ``LLMMessageBuilder.build()``
+  reads ``state.session_profile``.
+* ``LLMMessageBuilder`` calls the Anthropic Messages API.
+* ``candidates`` contains opaque ``parent_asin`` values from
+  ``Searcher.search()``; this module does not inspect product data.
 """
 
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Protocol, Tuple
 
-from state.dialogue_state import DialogueState  # BOUNDARY(state): type import only
+from state.dialogue_state import DialogueState
 
 __all__ = ["MessageBuilder", "TemplateMessageBuilder", "LLMMessageBuilder"]
 
@@ -60,7 +54,9 @@ _TEMPLATES: Dict[str, str] = {
 
 
 class TemplateMessageBuilder:
-    """Deterministic, zero-dependency phrasing keyed by ``ask_attribute``."""
+    """Build deterministic responses without external dependencies.
+    Currently being used in CRIS.
+    """
 
     def build(
         self,
@@ -75,7 +71,9 @@ class TemplateMessageBuilder:
 
 
 class LLMMessageBuilder:
-    # LLM phrasing from ``ask_attribute``, ``mode``, and the session state.
+    """Generate natural phrasing from the requested attribute and session state.
+    Currently not being used in CRIS.
+    """
 
     def __init__(self, client: Optional[object] = None, model: str = "claude-haiku-4-5") -> None:
         self._client = client
@@ -83,7 +81,7 @@ class LLMMessageBuilder:
 
     def _get_client(self):
         if self._client is None:
-            import anthropic  # BOUNDARY(external: Anthropic API)
+            import anthropic
 
             self._client = anthropic.Anthropic()
         return self._client
@@ -96,14 +94,10 @@ class LLMMessageBuilder:
         candidates: List[str],
     ) -> Tuple[str, Dict[str, int]]:
         client = self._get_client()
-        # "rejected" is excluded: those are values the customer declined, not
-        # known preferences -- including it here previously presented a
-        # rejected value (and the raw "no_preference:<attr>" marker string)
-        # to the model as if it were a confirmed fact.
         known = ", ".join(
             f"{key}={values}" for key, values in state.session_profile.items()
             if key != "rejected" and values
-        )  # BOUNDARY(state): reads DialogueState.session_profile
+        )
 
         if ask_attribute:
             instruction = f"Ask the customer about their {ask_attribute} preference in one short, natural sentence."
@@ -114,7 +108,7 @@ class LLMMessageBuilder:
             )
 
         context = f"Known so far this session: {known}." if known else "Nothing disclosed yet this session."
-        response = client.messages.create(  # BOUNDARY(external: Anthropic API) -- network call
+        response = client.messages.create(
             model=self.model,
             max_tokens=120,
             system=(

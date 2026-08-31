@@ -38,20 +38,7 @@ __all__ = [
     "budget_bounds",
 ]
 
-
-#: The ``ask_attribute`` enum from docs/agent_api_contract.json, minus ``null``.
-ASK_ATTRIBUTES: Tuple[str, ...] = (
-    "category",
-    "material",
-    "color",
-    "size",
-    "style",
-    "brand",
-    "budget",
-    "feature",
-    "use_case",
-    "other",
-)
+ASK_ATTRIBUTES: Tuple[str, ...] = ("category", "material", "color", "size", "style", "brand", "budget", "feature", "use_case", "other",)
 
 SLOT_KEYS: Tuple[str, ...] = ASK_ATTRIBUTES + ("rejected",)
 INTENT_LABELS: Tuple[str, ...] = ("buying", "browsing")
@@ -67,10 +54,7 @@ def empty_session_profile() -> Dict[str, List[str]]:
 
 
 def _as_str_list(value: Any) -> List[str]:
-    """Coerce hand-written or reloaded JSON into a list of strings.
-
-    A bare string becomes a one-item list, not a list of characters.
-    """
+    """Coerce hand-written or reloaded JSON into a list of strings."""
     if value in (None, "", []):
         return []
     if isinstance(value, str):
@@ -128,7 +112,6 @@ class DialogueState:
         )
 
     def copy(self) -> "DialogueState":
-        """Deep copy, so callers cannot change a state they were handed."""
         return copy.deepcopy(self)
 
     def filled_attributes(self) -> List[str]:
@@ -145,7 +128,7 @@ class DialogueState:
         ]
 
     def query_terms(self) -> List[str]:
-        """All positive slot values, flattened. A cheap retrieval query seed."""
+        """All positive slot values, flattened."""
         terms: List[str] = []
         for key in ASK_ATTRIBUTES:
             terms.extend(self.session_profile.get(key, []))
@@ -156,10 +139,7 @@ def budget_bounds(session_profile: Mapping[str, Any]) -> Dict[str, Optional[floa
     """Turn the ``budget`` slot's strings into numbers a price filter can use.
 
     The slot holds ``"<=120"``, ``">=25"``, or ``"~60"``. ``None`` means
-    unconstrained. A range gives both bounds; repeated bounds take the
-    *tighter* one. ``"~60"`` sets ``target_price`` only. Unparseable entries
-    are skipped rather than raised on, since the extractor is an LLM and a
-    stray ``"under $50"`` must degrade to "no constraint", not fail the turn.
+    unconstrained.
     """
     bounds: Dict[str, Optional[float]] = {
         "min_price": None,
@@ -167,8 +147,6 @@ def budget_bounds(session_profile: Mapping[str, Any]) -> Dict[str, Optional[floa
         "target_price": None,
     }
     for raw in session_profile.get("budget") or []:
-        # A model emitting "< =120" instead of "<=120" must not silently
-        # parse as no constraint, so strip all whitespace, not just ends.
         text = "".join(str(raw).split())
         for prefix, key, tighter in (
             ("<=", "max_price", min),
@@ -180,7 +158,7 @@ def budget_bounds(session_profile: Mapping[str, Any]) -> Dict[str, Optional[floa
             try:
                 value = float(text[len(prefix):].strip())
             except ValueError:
-                break  # normalization failed upstream; ignore this entry
+                break
             current = bounds[key]
             bounds[key] = value if current is None or tighter is None else tighter(current, value)
             break
@@ -212,7 +190,6 @@ def simulator_shortcut(message: str) -> Optional[Dict[str, Any]]:
         return {}
     return None
 
-#: key holds a bare string, not a list.
 SlotExtractor = Callable[[str, DialogueState], Dict[str, Any]]
 
 
@@ -228,11 +205,7 @@ def _contains_phrase(haystack: str, needle: str) -> bool:
 
 
 def _add(slots: Dict[str, List[str]], attribute: str, value: str) -> None:
-    """Append a cleaned value to a slot, deduped by case and by substring.
-
-    A short hit already covered by a longer phrase in the same slot is
-    dropped; the longer phrase wins if it arrives second.
-    """
+    """Append a cleaned value to a slot, deduped by case and by substring."""
     cleaned = _clean(value)
     if not cleaned:
         return
@@ -248,27 +221,13 @@ def _add(slots: Dict[str, List[str]], attribute: str, value: str) -> None:
 
 def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, Any]:
     """Does nothing. Returns ``{}``, meaning "no new info this turn."
-
-    Safe default so just importing this file never calls the network. Also
-    defines the shape any real extractor must return: ``{attribute: [values]}``,
-    plus optional ``"rejected"`` (dropped values), ``"no_preference"``
-    (attributes the customer declined), and ``"intent"`` (``"buying"``/
-    ``"browsing"``). The real one is :func:`state.llm_extractor.extract_slots`,
-    swapped in via ``DialogueStateTracker(extractor=...)``. On an API error it
-    should also return ``{}`` rather than raise.
+    Safe default so just importing this file never calls the network.
     """
     return {}
 
 
 class _SessionHistory:
-    """Compact, incrementally-updated bookkeeping for one session.
-
-    Tracks more than the current state can express — when a value first
-    appeared, how many times an attribute was revised — sized to the number
-    of distinct values/attributes ever touched, not to the number of turns.
-    Updated once per turn in :meth:`DialogueStateTracker.update`; nothing
-    replays a log to rebuild it.
-    """
+    """Incrementally-updated bookkeeping for one session."""
 
     def __init__(self) -> None:
         self.value_first_seen: Dict[Tuple[str, str], int] = {}
@@ -281,16 +240,7 @@ class _SessionHistory:
 
 
 class DialogueStateTracker:
-    """Owns state transitions for one or more sessions.
-
-    Keeps a per-session cache (:meth:`get_state`) since the harness only
-    passes ``session_id`` to ``Agent.respond()``; the cache is a
-    convenience, not the source of truth.
-
-    Args:
-        extractor: Slot-extraction callable, defaults to :func:`extract_slots`.
-            Pass an LLM-backed function with the same signature to upgrade.
-    """
+    """Owns state transitions for one or more sessions. Keeps a per-session cache (:meth:`get_state`)."""
 
     def __init__(self, extractor: Optional[SlotExtractor] = None) -> None:
         self.extractor: SlotExtractor = extractor or extract_slots
@@ -363,18 +313,11 @@ class DialogueStateTracker:
         current_state: DialogueState,
         turn: Optional[int] = None,
     ) -> DialogueState:
-        """Fold one utterance into the state and return a new state object.
-
-        ``current_state`` is never changed. Every change below comes from the
-        extractor's return value — an extractor returning ``{}`` (including
-        on API failure) means "no new information this turn", except
-        ``intent``, which resets to ``None`` rather than carrying forward.
+        """Fold one utterance into the state and return a new state object. ``current_state`` is never changed.
         """
         state = current_state.copy()
         state.turn = current_state.turn + 1 if turn is None else int(turn)
         state.conflicts_with_previous = False
-        # Attributes this turn replaced/retracted a value on, for the
-        # revision count in _update_history.
         revised_attributes: set = set()
         message = user_message or ""
         shortcut = simulator_shortcut(message)
@@ -387,15 +330,11 @@ class DialogueStateTracker:
         # iian
         # extracted = dict(self.extractor(message, current_state) or {})
 
-        # Intent is not a slot: not sticky, so a failed/empty turn means
-        # "unknown this turn", not "still whatever it was last turn".
         raw_intent = extracted.pop("intent", None)
         state.intent = raw_intent if raw_intent in INTENT_LABELS else None
 
         # (a) Retractions named by the extractor.
         displaced: set = set()
-        # Model output is untrusted: accept a bare string, drop empty values
-        # (which would otherwise match every slot and wipe the profile).
         raw_retracted = extracted.pop("rejected", None) or []
         if isinstance(raw_retracted, str):
             raw_retracted = [raw_retracted]
@@ -435,13 +374,10 @@ class DialogueStateTracker:
             if marker not in state.session_profile["rejected"]:
                 state.session_profile["rejected"].append(marker)
 
-        # (c) Apply new values. Only remaining conflict test is structural: a
-        # second, different value in a slot that holds exactly one.
+        # (c) Apply new values.
         for attribute, raw_values in extracted.items():
             if attribute not in ASK_ATTRIBUTES:
                 continue
-            # A bare string where a list belongs must not be iterated
-            # character by character.
             values = _as_str_list(raw_values)
             existing = state.session_profile[attribute]
             incompatible = (
@@ -532,6 +468,6 @@ class DialogueStateTracker:
 
 
 def _same_values(existing: List[str], incoming: List[str]) -> bool:
-    """True when the incoming values add nothing new, so there is no conflict."""
+    """True when the incoming values add nothing new."""
     known = {value.lower() for value in existing}
     return all(value.lower() in known for value in incoming)

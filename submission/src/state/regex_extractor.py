@@ -1,16 +1,16 @@
-"""Regex/gazetteer slot extractor: the cheap first pass before the LLM.
+"""Regex slot extractor: cheap first pass before the LLM.
 
-Resolves the closed-vocabulary slots (material, color, size, budget, use_case,
-style) with keyword/regex matching -- no network call, no tokens. Open-
-vocabulary slots (category, brand, feature, other, no_preference, rejected)
-have no fixed term list to match against, so a turn that needs one of those
-always falls through to :func:`state.llm_extractor.extract_slots`.
+Closed-vocabulary slots (material, color, size, budget, use_case, style) are
+resolved with local keyword/regex matching, with no network call or token use.
 
-Escalation rule (regex-first, LLM-on-miss-or-conflict): call the LLM only when
-this pass matched nothing, or when a single-value slot (``category``,
-``budget``, ``size`` -- see ``dialogue_state.SINGLE_VALUE_SLOTS``) matched more
-than one distinct value and needs a real read of the sentence to disambiguate.
-Everything else is resolved here for roughly zero cost.
+Open-vocabulary slots (category, brand, feature, other, no_preference,
+rejected) are not resolved here. Turns that require them fall through to
+``state.llm_extractor.extract_slots``.
+
+Escalation rule: use the LLM only when regex finds nothing or when a
+single-value slot (``category``, ``budget``, ``size``) has multiple distinct
+matches that require contextual disambiguation. Everything else is resolved
+locally.
 """
 
 from __future__ import annotations
@@ -42,13 +42,7 @@ _SIZE_WORD_RE = re.compile(
     r"\b(extra small|extra large|xs|small|medium|large|xxl|xl)\b", re.I
 )
 _SIZE_NUM_RE = re.compile(r"\bsize\s*(\d{1,2})\b", re.I)
-#: One alternation, not separate patterns per comparator, so a match like
-#: "under $80" is consumed whole by the "under" branch and the scan moves
-#: past it -- a separate bare-"$80" pattern would otherwise re-match the same
-#: number inside that phrase as a second, conflicting hit. Named groups map
-#: to the comparator ``dialogue_state.budget_bounds()`` expects (``"<=120"``/
-#: ``">=25"``/``"~60"``); free text like "under $80" is silently unparseable
-#: there, so the mapping has to happen here, not downstream.
+
 _BUDGET_RE = re.compile(
     r"\bunder\s+\$?(?P<under>\d+(?:\.\d{2})?)\b"
     r"|\bover\s+\$?(?P<over>\d+(?:\.\d{2})?)\b"
@@ -65,12 +59,7 @@ _BROWSE_RE = re.compile(
     r"any (?:ideas|suggestions)|thinking about|just curious)\b",
     re.I,
 )
-#: A decline doesn't name *which* attribute in a way regex can parse ("I
-#: don't have a preference for color" -- "color" here is naming the topic,
-#: not a color value) -- but we don't need to parse that out of the sentence
-#: at all: whatever was just asked (``current_state.previous_ask_attribute``)
-#: is what's being declined. Detecting the decline *pattern* and then doing a
-#: state lookup avoids needing the LLM to read the sentence.
+
 _DECLINE_RE = re.compile(
     r"\b(no preference|don'?t have (?:an? )?(?:additional )?preference|"
     r"not picky|use your judgment|whatever'?s? fine|don'?t care)\b",
@@ -89,8 +78,7 @@ def _size_hits(message: str) -> List[str]:
 
 
 def _budget_hits(message: str) -> List[str]:
-    """Budget mentions, normalized to the ``<=``/``>=``/``~`` format
-    ``budget_bounds()`` parses -- see the comment on ``_BUDGET_RE``."""
+    """Return budget matches in the format expected by ``budget_bounds()``."""
     hits = []
     for match in _BUDGET_RE.finditer(message):
         groups = match.groupdict()
@@ -120,7 +108,7 @@ def _decline_hit(message: str, current_state: DialogueState) -> List[str]:
 
 
 def regex_extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, Any]:
-    """Match closed-vocabulary slots by keyword/regex. Never calls the network."""
+    """Extract closed-vocabulary slots locally without an LLM call."""
     message = (user_message or "").strip()
     if not message:
         return {}
@@ -145,10 +133,9 @@ def regex_extract_slots(user_message: str, current_state: DialogueState) -> Dict
 
 
 def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, Any]:
-    """Hybrid extractor: regex first, LLM only on a miss or a conflict.
+    """Use regex extraction first and fall back to the LLM when needed.
 
-    Drop-in for ``DialogueStateTracker(extractor=...)`` -- same signature and
-    return shape as :func:`state.llm_extractor.extract_slots`.
+    Matches the ``DialogueStateTracker`` extractor interface and return shape.
     """
     regex_result = regex_extract_slots(user_message, current_state)
     conflicting = any(
@@ -156,7 +143,7 @@ def extract_slots(user_message: str, current_state: DialogueState) -> Dict[str, 
         for key, values in regex_result.items()
         if key != "intent"
     )
-    resolved_anything = len(regex_result) > 1  # more than just "intent"
+    resolved_anything = len(regex_result) > 1
     if resolved_anything and not conflicting:
         return regex_result
     return _llm_extract_slots(user_message, current_state) or regex_result
