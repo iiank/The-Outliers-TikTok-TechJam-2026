@@ -1,0 +1,19 @@
+# Core
+numpy>=1.26
+
+# Dense retrieval (embed/) and reranker (reranker/)
+sentence-transformers>=3.0
+torch>=2.0
+
+# Dense vector store (embed/store.py)
+chromadb>=0.5
+
+# Entropy-based attribute selection (generation/weighted_entropy.py)
+scipy>=1.11
+
+# LLM intent classifier (agent/intent_classifier.py, agent/message_builder.py)
+anthropic>=0.40
+
+# Frontend demo (frontend/)
+streamlit>=1.35
+pandas>=2.0
