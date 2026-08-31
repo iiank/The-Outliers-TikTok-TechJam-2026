@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 import pandas as pd
 
-from ui_helpers import load_evaluation_data, parse_scenario_metrics, parse_sessions
+from utils.ui_helpers import load_evaluation_data, parse_scenario_metrics, parse_sessions
 
 st.set_page_config(page_title="Evaluation Dashboard", page_icon="📊", layout="wide")
 

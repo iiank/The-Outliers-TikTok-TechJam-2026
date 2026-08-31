@@ -18,7 +18,10 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(PROJECT_ROOT / "submission") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "submission"))
 
-from submission.agent import Agent
+from submission.src.frontend.utils.pipeline_handler import (
+    PipelineHandler,
+    get_pipeline_handler,
+)
 
 MAX_TURNS = 10
 MAX_USER_CHARS = 250
@@ -35,12 +38,12 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# Agent Loader & Session Initialization
+# Pipeline Handler Loader & Session Initialization
 # -----------------------------------------------------------------------------
-@st.cache_resource(show_spinner="Initialising Agent...")
-def load_live_agent() -> Agent:
-    """Instantiates Shopping Agent."""
-    return Agent()
+@st.cache_resource(show_spinner="Initialising CRIS...")
+def load_pipeline_handler() -> PipelineHandler:
+    """Return the process-wide, thread-isolated CRIS backend."""
+    return get_pipeline_handler()
 
 
 def init_session_state():
@@ -72,11 +75,11 @@ def reset_conversation():
 init_session_state()
 
 try:
-    active_agent = load_live_agent()
-    agent_load_error = None
+    pipeline_handler = load_pipeline_handler()
+    pipeline_load_error = None
 except Exception as e:
-    active_agent = None
-    agent_load_error = str(e)
+    pipeline_handler = None
+    pipeline_load_error = str(e)
 
 # -----------------------------------------------------------------------------
 # Sidebar: Session Controls & Active Tags Indicator
@@ -87,12 +90,12 @@ st.sidebar.caption(f"Session ID: `{st.session_state.session_id}`")
 progress_val = min((st.session_state.current_turn - 1) / MAX_TURNS, 1.0)
 st.sidebar.progress(progress_val, text=f"Turn {st.session_state.current_turn} of {MAX_TURNS}")
 
-if agent_load_error:
-    st.sidebar.error(f"⚠️ Could not load Agent: {agent_load_error}")
+if pipeline_load_error:
+    st.sidebar.error(f"⚠️ Could not load CRIS: {pipeline_load_error}")
 else:
-    st.sidebar.success("✅ Live Agent Loaded")
+    st.sidebar.success("✅ CRIS Ready")
 
-if st.sidebar.button("Reset Session", use_container_width=True):
+if st.sidebar.button("Reset Session", width='stretch'):
     reset_conversation()
     st.rerun()
 
@@ -137,13 +140,11 @@ with col_chat:
         )
 
         if st.button("Start Conversation 🚀", type="primary", disabled=len(selected_tags) == 0):
-            st.session_state.user_preference_tags = selected_tags
-            st.session_state.profile_confirmed = True
-
-            # Reset agent state with initialized profile
-            if active_agent is not None:
+            if pipeline_handler is None:
+                st.error("CRIS is not initialized. Please check the backend configuration.")
+            else:
                 try:
-                    active_agent.reset(
+                    pipeline_handler.reset(
                         session_id=st.session_state.session_id,
                         user_profile={
                             "preference_tags": selected_tags,
@@ -151,9 +152,11 @@ with col_chat:
                         },
                     )
                 except Exception as e:
-                    st.error(f"Failed to reset agent with profile: {e}")
-
-            st.rerun()
+                    st.error(f"Failed to reset CRIS session with profile: {e}")
+                else:
+                    st.session_state.user_preference_tags = selected_tags
+                    st.session_state.profile_confirmed = True
+                    st.rerun()
 
     # Step 2: Active Chat Interface
     else:
@@ -177,41 +180,21 @@ with col_chat:
                         if msg.get("ask_attribute"):
                             st.caption(f"🎯 **Target Clarification Attribute:** `{msg['ask_attribute']}`")
 
-                        recommendations = msg.get("recommendations", [])
+                        recommendations = st.session_state.latest_diagnostics.get("top_candidates_ce", [])
                         if recommendations:
                             with st.expander(f"📦 Top {len(recommendations)} Recommendations (Turn {msg.get('turn', '-')})", expanded=True):
-                                top_picks = recommendations[:2]
-                                c1, c2 = st.columns(2)
-                                for idx, item in enumerate(top_picks):
-                                    col_target = c1 if idx == 0 else c2
-                                    with col_target:
-                                        asin = item.get("parent_asin", "N/A")
-                                        title = item.get("title", f"Product {asin}")
-                                        score = item.get("score")
-                                        score_txt = f" • Score: `{score:.4f}`" if score is not None else ""
-                                        st.markdown(
-                                            f"""
-                                            <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 10px; margin-bottom: 5px; background-color: rgba(128,128,128,0.05);">
-                                                <strong>#{idx+1} {asin}</strong>{score_txt}<br/>
-                                                <span style="font-size: 0.85em;">{title[:80]}...</span>
-                                            </div>
-                                            """,
-                                            unsafe_allow_html=True,
-                                        )
-
-                                if len(recommendations) > 2:
-                                    st.dataframe(
-                                        [
-                                            {
-                                                "Rank": i + 3,
-                                                "ASIN": r.get("parent_asin", "N/A"),
-                                                "Title": r.get("title", f"Product {r.get('parent_asin')}"),
-                                            }
-                                            for i, r in enumerate(recommendations[2:])
-                                        ],
-                                        use_container_width=True,
-                                        hide_index=True,
-                                    )
+                                st.dataframe(
+                                    [
+                                        {
+                                            "Rank": i + 1,
+                                            "ASIN": r.get("parent_asin", "N/A"),
+                                            "Title": r.get("title", f"Product {r.get('parent_asin')}"),
+                                        }
+                                        for i, r in enumerate(recommendations)
+                                    ],
+                                    width='stretch',
+                                    hide_index=True,
+                                )
 
         # Chat Input Bar
         if st.session_state.current_turn <= MAX_TURNS:
@@ -223,16 +206,16 @@ with col_chat:
             if user_input:
                 clean_input = user_input.strip()
                 if clean_input:
-                    if active_agent is None:
-                        st.error("Agent is not initialized. Please ensure the agent backend is available.")
+                    if pipeline_handler is None:
+                        st.error("CRIS is not initialized. Please check the backend configuration.")
                     else:
                         # 1. Record User Turn
                         st.session_state.messages.append({"role": "user", "content": clean_input})
 
-                        # 2. Process Turn through Agent
-                        with st.spinner("Processing turn through CRIS pipeline..."):
+                        # 2. Process the turn on the handler's dedicated worker.
+                        with st.spinner("Processing turn through CRIS..."):
                             try:
-                                turn_output = active_agent.respond_chat(
+                                turn_output = pipeline_handler.respond_chat(
                                     session_id=st.session_state.session_id,
                                     user_message=clean_input,
                                     turn=st.session_state.current_turn,
@@ -253,7 +236,7 @@ with col_chat:
                                 st.session_state.current_turn += 1
                                 st.rerun()
                             except Exception as e:
-                                st.error(f"Error executing agent turn: {e}")
+                                st.error(f"Error executing CRIS turn: {e}")
         else:
             st.warning("🛑 Maximum turns (10/10) reached for this session. Please reset the session to start again.")
 
@@ -292,7 +275,7 @@ with col_inspect:
         # 2. Dynamic State Tracking (DST)
         # ---------------------------------------------------------------------
         st.markdown("**2. Dynamic State Tracking (DST)**")
-        dyn_state = diagnostics.get("dynamic_state", {})
+        dyn_state = diagnostics.get("dynamic_state") or diagnostics.get("state", {})
         session_profile = dyn_state.get("session_profile", {})
         detected_intent = dyn_state.get("intent", "buying")
 
@@ -343,9 +326,9 @@ with col_inspect:
         st.markdown("---")
 
         # ---------------------------------------------------------------------
-        # 4. Top 5 Cross-Encoder Candidate Rankings
+        # 4. Top 10 Cross-Encoder Candidate Rankings
         # ---------------------------------------------------------------------
-        st.markdown("**4. Reranker (Cross-Encoder) Top 5 Scoring**")
+        st.markdown("**4. Reranker (Cross-Encoder) Top 10 Scoring**")
         ce_candidates = diagnostics.get("top_candidates_ce", [])
 
         if ce_candidates:
@@ -357,13 +340,13 @@ with col_inspect:
                         "Score": item.get("score", 0.0),
                         "Title": item.get("title", f"Product {item.get('parent_asin')}"),
                     }
-                    for idx, item in enumerate(ce_candidates[:5])
+                    for idx, item in enumerate(ce_candidates[:10])
                 ]
             )
 
             st.dataframe(
                 df_ce,
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
                 column_config={
                     "Rank": st.column_config.NumberColumn("Rank"),
