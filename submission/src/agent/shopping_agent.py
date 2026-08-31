@@ -4,8 +4,13 @@ Ties together three pieces behind narrow interfaces, so each can be
 developed and swapped independently:
 
 * state tracking (``state.dialogue_state.DialogueStateTracker`` -- owned
-  elsewhere, treated here as a black box);
-* intent classification, buy vs. browse (``agent.intent_classifier``);
+  elsewhere, treated here as a black box). Intent (buy vs. browse) comes
+  from here too: ``state.llm_extractor``'s joint intent+slot extraction
+  sets ``DialogueState.intent`` as part of the same call that fills in
+  session_profile slots -- there is deliberately no separate intent
+  classification step in this module (a standalone classifier used to
+  exist here; removed as a redundant second LLM call once the state
+  teammate's extractor started returning intent for free);
 * search: retrieval plus the attribute worth asking about next as a black box;
 * message phrasing (``agent.message_builder``).
 
@@ -23,9 +28,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
-from agent.intent_classifier import IntentClassifier, LLMIntentClassifier
 from agent.message_builder import LLMMessageBuilder, MessageBuilder
 from state.dialogue_state import DialogueState, DialogueStateTracker
+from state.llm_client import drain_usage, reset_usage
 from search import search
 
 __all__ = ["Agent", "StateTracker"]
@@ -50,43 +55,46 @@ def _combined_usage(*parts: Dict[str, int]) -> Dict[str, int]:
 
 class Agent:
     """Conformant ``reset``/``respond`` agent -- entry point for the evaluator.
-    
-    ``intent_classifier``, and ``message_builder`` default to the real
-    dialogue-state tracker and this module's own LLM-backed implementations,
-    but are all independently swappable (fakes for tests, the offline
-    regex/template alternatives).
+
+    ``state_tracker`` and ``message_builder`` default to the real
+    dialogue-state tracker and this module's own LLM-backed implementation,
+    but are both independently swappable (fakes for tests, the offline
+    template alternative).
     """
 
     def __init__(
         self,
         state_tracker: Optional[StateTracker] = None,
-        intent_classifier: Optional[IntentClassifier] = None,
         message_builder: Optional[MessageBuilder] = None,
     ) -> None:
         self.state_tracker: StateTracker = state_tracker or DialogueStateTracker()  # BOUNDARY(state): default-constructs the state teammate's tracker
-        self.intent_classifier: IntentClassifier = intent_classifier or LLMIntentClassifier()
         self.message_builder: MessageBuilder = message_builder or LLMMessageBuilder()
 
     def reset(self, session_id: str, user_profile: dict) -> None:
         self.state_tracker.reset(session_id, user_profile)  # BOUNDARY(state)
+        reset_usage()  # zero the extractor's token meter so a fresh session never inherits a prior session's leftover count
 
     def respond(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
         prior_state = self.state_tracker.get_state(session_id)  # BOUNDARY(state): reads the state teammate's DialogueState
-        mode = self.intent_classifier.classify(user_message, prior_state)
-        state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model
+        state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model; also sets state.intent
+        mode = state.intent or "browsing"  # BOUNDARY(state): joint intent+slot extraction, not a separate classifier call
 
-        candidates, ask_attribute, _diagnostics = search(state)
+        candidates, ask_attribute, _diagnostics = search(state, user_message)
         candidates = candidates[:top_k]
         self.state_tracker.record_recommendations(state, candidates)  # BOUNDARY(state)
 
         message, message_usage = self.message_builder.build(ask_attribute, mode, state, candidates)
-        classify_usage = getattr(self.intent_classifier, "last_usage", {}) or {}
+        # BOUNDARY(state): the state teammate's extractor tracks its own token
+        # spend internally (state.llm_client) rather than returning it from
+        # update() -- drain_usage() reads and resets that counter. Called once
+        # per turn, right before the response is built, per its own contract.
+        extractor_usage = drain_usage()
 
         return {
             "message": message,
             "ask_attribute": ask_attribute,
             "recommendations": [{"parent_asin": parent_asin} for parent_asin in candidates],
-            "usage": _combined_usage(classify_usage, message_usage),
+            "usage": _combined_usage(extractor_usage, message_usage),
         }
 
     def respond_chat(self, session_id: str, user_message: str, turn: int, top_k: int) -> dict:
@@ -115,16 +123,15 @@ class Agent:
         }
         '''
         prior_state = self.state_tracker.get_state(session_id)  # BOUNDARY(state): reads the state teammate's DialogueState
-        mode = self.intent_classifier.classify(user_message, prior_state)
-        state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model
+        state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model; also sets state.intent
+        mode = state.intent or "browsing"  # BOUNDARY(state): joint intent+slot extraction, not a separate classifier call
 
-        candidates, ask_attribute, diagnostics = search(state)
+        candidates, ask_attribute, diagnostics = search(state, user_message)
         candidates = candidates[:top_k]
         self.state_tracker.record_recommendations(state, candidates)  # BOUNDARY(state)
 
         message, message_usage = self.message_builder.build(ask_attribute, mode, state, candidates)
-        classify_usage = getattr(self.intent_classifier, "last_usage", {}) or {}
-        
+
         return {
             "message": message,
             "ask_attribute": ask_attribute,

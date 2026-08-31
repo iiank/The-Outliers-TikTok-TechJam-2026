@@ -117,12 +117,24 @@ def _to_dict(state: Any) -> Dict[str, Any]:
     return dict(state)
 
 
-def build_retrieval_query(state_dict: Dict[str, Any]) -> str:
-    """Flattens session_profile's disclosed values into a plain search string."""
+# def build_retrieval_query(state_dict: Dict[str, Any]) -> str:
+#     """Flattens session_profile's disclosed values into a plain search string."""
+#     session_profile = state_dict.get("session_profile", {})
+#     terms: List[str] = []
+#     for values in session_profile.values():
+#         terms.extend(v for v in values if v)
+#     return " ".join(terms)
+
+# iian
+def build_retrieval_query(state_dict: Dict[str, Any], user_message: str = "") -> str:
     session_profile = state_dict.get("session_profile", {})
     terms: List[str] = []
-    for values in session_profile.values():
+    for key, values in session_profile.items():
+        # if key == "rejected":
+        #     continue
         terms.extend(v for v in values if v)
+    if user_message:
+        terms.append(user_message)
     return " ".join(terms)
 
 
@@ -157,13 +169,25 @@ class SearchPipeline:
         self.reranker: Reranker = reranker or Reranker()
         self.entropy_gen: WeightedEntropy = entropy_gen or WeightedEntropy()
 
-    def search(self, state: Any) -> Tuple[List[str], Optional[str], Dict[str, Any]]:
+
+# iian
+        self._transcripts: Dict[str, List[str]] = {}
+
+    # def search(self, state: Any) -> Tuple[List[str], Optional[str], Dict[str, Any]]:
+    def search(self, state: Any, user_message: str = "") -> Tuple[List[str], Optional[str], Dict[str, Any]]:
         """
         Executes end-to-end multi-stage recommendation and question generation.
 
         Returns:     Tuple[List[str], Optional[str]]: (Top 10 recommended parent_asins, selected attribute to inquire, or None to show results without asking)
         """
         state_dict = _to_dict(state)
+
+        # iian
+        session_id = str(state_dict.get("session_id") or "")
+        if user_message:
+            self._transcripts.setdefault(session_id, []).append(user_message)
+        transcript = " ".join(self._transcripts.get(session_id, []))
+
         session_profile = state_dict.get("session_profile", {})
         diagnostics = {}
         diagnostics["state"] = state_dict
@@ -182,7 +206,13 @@ class SearchPipeline:
         if intent_mode not in ("buying", "browsing"):
             intent_mode = "browsing"
 
-        query_terms = build_retrieval_query(state_dict)
+# iian
+
+        # query_terms = build_retrieval_query(state_dict)
+        query_terms = build_retrieval_query(state_dict, transcript)
+        # logger.warning("profile: %r", session_profile)
+        # logger.warning("state keys: %r", list(state_dict.keys()))
+        # logger.warning("turn query: %r", query_terms)
         
         entropy_pool_size = 500
         reranker_pool_size = 100
@@ -217,13 +247,15 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 4. Cross-Encoder Reranking -> Top 10 Recommendations
         # ---------------------------------------------------------------------
-        catalog = load_reranker_catalog(str(RERANKER_CATALOG_PATH))
-        catalog_items = list(catalog.items()) if isinstance(catalog, dict) else list(catalog)
+        # catalog = load_reranker_catalog(str(RERANKER_CATALOG_PATH))
+        # catalog_items = list(catalog.items()) if isinstance(catalog, dict) else list(catalog)
         
         reranked_docs = self.reranker.rank_from_state(
             state=state_dict,
             candidate_indices=reranker_indices,
-            catalog=catalog_items,
+            # catalog=catalog_items,
+            # iian
+            catalog=self.catalog,
             top_k=10,
         )
         
@@ -280,13 +312,20 @@ class SearchPipeline:
 # -----------------------------------------------------------------------------
 _PIPELINE_INSTANCE: Optional[SearchPipeline] = None
 
-def search(state: Any) -> Tuple[List[str], Optional[str], Dict[str, Any]]:
-    """
-    Overarching search API called by agent.py.
-    Maintains persistent memory instances of models and catalog.
-    """
+# def search(state: Any) -> Tuple[List[str], Optional[str], Dict[str, Any]]:
+#     """
+#     Overarching search API called by agent.py.
+#     Maintains persistent memory instances of models and catalog.
+#     """
+#     global _PIPELINE_INSTANCE
+#     if _PIPELINE_INSTANCE is None:
+#         _PIPELINE_INSTANCE = SearchPipeline()
+#     candidates, ask_attribute, diagnostics = _PIPELINE_INSTANCE.search(state)
+#     return candidates, ask_attribute, diagnostics
+
+# iian
+def search(state: Any, user_message: str = "") -> Tuple[List[str], Optional[str], Dict[str, Any]]:
     global _PIPELINE_INSTANCE
     if _PIPELINE_INSTANCE is None:
         _PIPELINE_INSTANCE = SearchPipeline()
-    candidates, ask_attribute, diagnostics = _PIPELINE_INSTANCE.search(state)
-    return candidates, ask_attribute, diagnostics
+    return _PIPELINE_INSTANCE.search(state, user_message)

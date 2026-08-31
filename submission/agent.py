@@ -32,10 +32,6 @@ def _has_anthropic_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
 
 
-def _default_intent_classifier() -> IntentClassifier:
-    return LLMIntentClassifier() if _has_anthropic_key() else RegexIntentClassifier()
-
-
 def _default_message_builder() -> MessageBuilder:
     return LLMMessageBuilder() if _has_anthropic_key() else TemplateMessageBuilder()
 
@@ -43,11 +39,15 @@ def _default_message_builder() -> MessageBuilder:
 class Agent(_ShoppingAgent):
     """The graded entrypoint. See module docstring for the default-wiring
     rationale; every piece remains swappable via the parent class's
-    constructor if you want to override a default explicitly."""
+    constructor if you want to override a default explicitly.
+
+    No separate intent classifier is wired here -- intent comes from
+    ``extract_slots`` (``state.regex_extractor``, escalating to
+    ``state.llm_extractor``'s joint intent+slot call), same as
+    ``agent.shopping_agent.Agent`` now expects."""
 
     def __init__(self) -> None:
         super().__init__(
             state_tracker=DialogueStateTracker(extractor=extract_slots),
-            intent_classifier=_default_intent_classifier(),
             message_builder=_default_message_builder(),
         )
