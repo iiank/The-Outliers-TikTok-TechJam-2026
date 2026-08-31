@@ -18,7 +18,7 @@ def _join(values: object, limit: int | None = None) -> str:
     return " ".join(items)
 
 
-def product_to_text(row: dict, variant: str = "default") -> str:
+def product_to_text(row: dict, variant: str = "title_cat") -> str:
     title = str(row.get("title") or "")
     categories = " > ".join(str(c) for c in (row.get("categories") or []))
 

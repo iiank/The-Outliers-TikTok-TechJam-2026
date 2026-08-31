@@ -25,6 +25,7 @@ from generation import AskState, AttributeTable, explain_selection, select_attri
 import generation.weighted_entropy as weighted_entropy
 from generation.weighted_entropy import ASKABLE_ATTRIBUTES, FEATURE_SCORE, MIN_SCORE
 from retrieval import BM25Index, CatalogIndex, Retriever
+import retrieval.rrf as rrf
 from retrieval.rrf import weights_for_mode
 
 MODE_FOR_SCENARIO = {
@@ -88,6 +89,7 @@ def run_session(
     clarify: bool,
     pool_size: int,
     min_score: float = MIN_SCORE,
+    half_life: float = 20.0,
 ) -> Dict[str, Any]:
     sample = case["sample"]
     target = case["target"]
@@ -130,7 +132,8 @@ def run_session(
         ask_attribute: Optional[str] = None
         if clarify:
             ask_attribute, _ = select_attribute(
-                pool, table, ask_state, case["tags"], min_score=min_score
+                pool, table, ask_state, case["tags"],
+                half_life=half_life, min_score=min_score
             )
         asked.append(ask_attribute)
 
@@ -183,12 +186,24 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--feature-score", type=float, default=FEATURE_SCORE,
                         help="flat score for the untyped 'feature' open question. 0 disables it")
+    parser.add_argument("--half-life", type=float, default=20.0,
+                        help="rank decay: rank N weighs half of rank 1. Sweep 10 20 50 100")
+    parser.add_argument("--buying-weights", type=float, nargs=2, default=None,
+                        metavar=("BM25", "DENSE"),
+                        help="override retrieval.rrf.BUYING_WEIGHTS, e.g. --buying-weights 3 1")
+    parser.add_argument("--browsing-weights", type=float, nargs=2, default=None,
+                        metavar=("BM25", "DENSE"),
+                        help="override retrieval.rrf.BROWSING_WEIGHTS, e.g. --browsing-weights 1 2")
     parser.add_argument("--explain", type=int, default=2, metavar="N",
                         help="print a full score breakdown for the first N samples (0 to skip)")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     weighted_entropy.FEATURE_SCORE = args.feature_score
+    if args.buying_weights:
+        rrf.BUYING_WEIGHTS.update(zip(("bm25", "dense"), args.buying_weights))
+    if args.browsing_weights:
+        rrf.BROWSING_WEIGHTS.update(zip(("bm25", "dense"), args.browsing_weights))
 
     print("loading catalogue, store and routes ...")
     samples = load_jsonl(args.dataset)
@@ -208,7 +223,8 @@ def main() -> None:
     print(f"catalogue {len(catalog_ids)} | dense store {len(store)} | "
           f"askable {', '.join(table.attributes())}")
     print(f"scoring {len(cases)} of {len(samples)} samples | min_score={args.min_score}"
-          f" | feature_score={args.feature_score}\n")
+          f" | feature_score={args.feature_score} | half_life={args.half_life}"
+          f" | weights buying={dict(rrf.BUYING_WEIGHTS)} browsing={dict(rrf.BROWSING_WEIGHTS)}\n")
 
     section("1. turn-1 recall by route  (where the purchased product ranks)")
     route_ranks: Dict[str, Dict[str, List[Optional[int]]]] = defaultdict(lambda: defaultdict(list))
@@ -255,7 +271,7 @@ def main() -> None:
     for label, clarify in (("clarify", True), ("silent", False)):
         arms[label] = [
             run_session(case, retriever, table, catalog_id_set, clarify,
-                        args.pool_size, args.min_score)
+                        args.pool_size, args.min_score, args.half_life)
             for case in cases
         ]
 
@@ -311,7 +327,8 @@ def main() -> None:
             message = initial_message(case["sample"], case["category"], set())
             result = retriever.retrieve(message, case["mode"], entropy_pool_size=args.pool_size)
             detail = explain_selection(
-                result.entropy_pool, table, AskState(), case["tags"], min_score=args.min_score
+                result.entropy_pool, table, AskState(), case["tags"],
+                half_life=args.half_life, min_score=args.min_score
             )
             print(f"{case['sample_id']}  [{case['scenario']}]  tags={case['tags']}")
             print(f"  {message}")
@@ -331,6 +348,9 @@ def main() -> None:
             "samples_scored": len(cases),
             "min_score": args.min_score,
             "feature_score": args.feature_score,
+            "half_life": args.half_life,
+            "buying_weights": dict(rrf.BUYING_WEIGHTS),
+            "browsing_weights": dict(rrf.BROWSING_WEIGHTS),
             "turn_one_recall": {
                 s: {r: recall_table(v) for r, v in routes.items()} for s, routes in route_ranks.items()
             },
