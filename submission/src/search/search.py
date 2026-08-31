@@ -1,6 +1,8 @@
 import re
 from typing import Any, Callable, Dict, List, Optional, Set, Union, Sequence, Tuple
 import logging
+from pathlib import Path
+import sys
 
 from generation.weighted_entropy import WeightedEntropy
 from reranker.reranker import Reranker, load_reranker_catalog
@@ -17,6 +19,12 @@ DEFAULT_ATTRIBUTE_PRIORITY: List[str] = ["material", "feature", "color", "style"
 """
 HARD FILTERING
 """
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+    
+RERANKER_CATALOG_PATH = ROOT_DIR / "submission" / "src" / "reranker" / "reranker_catalog.jsonl"
 
 def is_category_satisfied(
     catalog_category: Optional[Union[List[str], str]],
@@ -205,10 +213,13 @@ class SearchPipeline:
         # ---------------------------------------------------------------------
         # 4. Cross-Encoder Reranking -> Top 10 Recommendations
         # ---------------------------------------------------------------------
+        catalog = load_reranker_catalog(str(RERANKER_CATALOG_PATH))
+        catalog_items = list(catalog.items()) if isinstance(catalog, dict) else list(catalog)
+        
         reranked_docs = self.reranker.rank_from_state(
             state=state_dict,
             candidate_indices=reranker_indices,
-            catalog=self.catalog,
+            catalog=catalog_items,
             top_k=10,
         )
         top_10_asins = [

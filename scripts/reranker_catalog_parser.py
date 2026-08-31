@@ -56,6 +56,7 @@ with open("catalog.jsonl", "r", encoding="utf-8") as infile, open("reranker_cata
 
         output = {
             "parent_asin": product.get("parent_asin"),
+            "title": title,
             "document": template.format(
                 title=title,
                 store=store,
