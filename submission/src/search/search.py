@@ -226,17 +226,18 @@ class SearchPipeline:
             catalog=catalog_items,
             top_k=10,
         )
+        
         top_10_asins = [
             doc["parent_asin"] for doc in reranked_docs if "parent_asin" in doc
         ]
-        # NOTE: need to get the doc title
+        
         diagnostics["top_candidates_ce"] = [
             {
-                "asin": doc.get("parent_asin", ""),
+                "parent_asin": doc.get("parent_asin", ""),
                 "score": doc.get("score"),
                 "title": doc.get("title", ""),
             }
-            for doc in reranked_docs[:5]
+            for doc in reranked_docs[:10]
         ]
 
         # ---------------------------------------------------------------------
