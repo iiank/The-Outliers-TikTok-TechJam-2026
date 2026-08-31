@@ -1,24 +1,15 @@
 """Wires the BM25 and dense routes together through weighted RRF.
 
 ``Retriever.retrieve(query_terms, mode, failed_asins=None)`` is the single
-entry point. Per the team's Aug 2026 build brief (and the retrieval +
-search integration fixes that followed it):
+entry point.
 
-* Task 1 -- fusion is weighted differently for ``"buying"`` vs
-  ``"browsing"`` (see ``retrieval.rrf.weights_for_mode``).
-* Task 2 -- one fused computation produces two slices: a top-500 pool for
-  the entropy/ask-attribute policy, and a top-100 ``(catalog_index,
-  rrf_score)`` pool for the reranker. Both are prefixes of the same fused
-  list, not two separate retrieval passes.
-* Hard filtering (category + budget) is owned entirely by
-  ``search.py``'s ``get_failed_hard_filter_asins()``, which reads
-  ``state["session_profile"]`` and returns ``parent_asin``s to exclude.
-  This module's only job is to turn that exclusion list into the same
-  kind of ``candidate_ids`` set both routes already know how to search
-  within -- "catalog minus excluded" instead of a positive match set.
-  (The turn-1-message category pre-filter that used to live here, in
-  ``retrieval.category_filter``, has been removed as redundant with
-  ``search.py``'s session-state-based filter.)
+1) fusion is weighted differently for ``"buying"`` vs ``"browsing"``
+(see ``retrieval.rrf.weights_for_mode``).
+2) one retrieval pass produces two slices: a top-500 pool for entropy calculations,
+and a top-100 ``(catalog_index, rrf_score)`` pool for the reranker.
+3) ``search.py``'s ``get_failed_hard_filter_asins()`` executes hard
+filtering on category and returns ``parent_asin``s to exclude. This module
+takes the list to exclude in both keyword/semantic search routes.
 """
 
 from __future__ import annotations
@@ -32,52 +23,30 @@ from .rrf import ROUTE_ORDER, reciprocal_rank_fusion, weights_for_mode
 
 __all__ = ["Retriever", "RetrievalResult", "DenseRoute", "DEFAULT_ENTROPY_POOL_SIZE", "DEFAULT_RERANKER_POOL_SIZE"]
 
-#: Named config, not magic numbers -- per the build brief, 500/100 are
-#: adjustable and only worth revisiting if there's spare time.
 DEFAULT_ENTROPY_POOL_SIZE = 500
 DEFAULT_RERANKER_POOL_SIZE = 100
 
-#: How much deeper to query the dense route than the target pool size
-#: whenever a hard filter has excluded any candidates, to compensate for
-#: the overfetch+filter-in-Python approach (see module docstring / build
-#: discussion): VectorStore.search() has no candidate-ID parameter, so
-#: restricting it means asking for more than needed, then discarding
-#: anything outside the allowed set. A heavily-filtered turn can still
-#: come back short of the target pool size -- that's a known, accepted
-#: limit of this approach, not a bug.
+# How much deeper to query the dense route than the target pool size
+# Compensates for the overfetch+filter-in-Python approach
 _DENSE_OVERFETCH_MULTIPLIER = 5
 
 
 class DenseRoute(Protocol):
-    """Structural contract ``embed.store.VectorStore`` satisfies.
-
-    Deliberately has no ``candidate_ids`` parameter -- unlike
-    :meth:`BM25Index.search`, the dense route is never asked to filter
-    itself; :meth:`Retriever._search_dense` overfetches and filters in
-    Python instead, so this module never needs to touch ``embed/store.py``.
-    Works the same way regardless of whether the candidate set came from
-    a positive category match or (now) a hard-filter exclusion list.
-    """
+    """Structural contract ``embed.store.VectorStore`` satisfies."""
 
     def search(self, query: str, top_k: int) -> Sequence[Tuple[str, float]]: ...
 
 
 @dataclass
 class RetrievalResult:
-    """Task 2's hand-off shape: two slices of one fused computation.
+    """Two slices of the one retrieval pass.
 
     ``entropy_pool``: up to ``entropy_pool_size`` results, each
     ``{"parent_asin": str, "catalog_index": int | None, "score": float}``
-    -- the live candidate pool ``policy.ask_attribute``'s entropy
-    calculation runs over.
 
     ``reranker_pool``: up to ``reranker_pool_size`` ``(catalog_index,
     rrf_score)`` pairs, in ranked order -- catalog indices, not
-    ``parent_asin`` strings, per the confirmed reranker contract.
-    Index -> ``parent_asin`` conversion happens downstream, outside this
-    module (see the load-bearing assumption in the build brief: every
-    consumer of an index must resolve it against the same catalog order,
-    which is exactly what ``CatalogIndex`` is for).
+    ``parent_asin`` strings (mappings resolved using``CatalogIndex``).
     """
 
     entropy_pool: List[Dict[str, Any]] = field(default_factory=list)
@@ -86,7 +55,7 @@ class RetrievalResult:
 
 @dataclass
 class Retriever:
-    """Fuses BM25 + dense via mode-weighted RRF, behind search.py's hard-filter exclusions."""
+    """Fuses BM25 + dense via mode-weighted RRF"""
 
     bm25: BM25Index
     dense: DenseRoute
@@ -101,20 +70,14 @@ class Retriever:
         reranker_pool_size: int = DEFAULT_RERANKER_POOL_SIZE,
         failed_asins: Optional[Sequence[str]] = None,
     ) -> RetrievalResult:
-        """Run the full retrieval + fusion pipeline for one turn.
+        """Runs full retrieval + fusion pipeline for one turn.
 
-        ``query_terms`` is what both routes search with -- building it
-        from the conversation's accumulated state (vs. just this turn's
-        raw text) is the caller's responsibility, not this module's.
+        ``query_terms`` built from state is input for both routes
 
         ``failed_asins``, if given, is a list of ``parent_asin``s to
-        exclude before either route searches -- typically
-        ``search.get_failed_hard_filter_asins()``'s output (category +
-        budget hard constraints). Pass ``None`` or ``[]`` for no
-        exclusions: both routes then search the full catalog.
+        exclude before either route searches
 
-        ``mode`` must be ``"buying"`` or ``"browsing"`` -- see
-        ``retrieval.rrf.weights_for_mode``.
+        ``mode`` must be ``"buying"`` or ``"browsing"``
         """
         pool_size = max(entropy_pool_size, reranker_pool_size)
         candidate_ids = self._resolve_candidate_ids(failed_asins)
@@ -143,12 +106,7 @@ class Retriever:
         return RetrievalResult(entropy_pool=entropy_pool, reranker_pool=reranker_pool)
 
     def _resolve_candidate_ids(self, failed_asins: Optional[Sequence[str]]) -> Optional[Set[str]]:
-        """``failed_asins`` -> allowed-ID set (catalog minus excluded), or ``None`` (unscoped).
-
-        ``None`` -- not an empty set -- whenever there's nothing to
-        exclude, so both routes take the cheap unscoped path instead of
-        needlessly restricting to "everything."
-        """
+        """``failed_asins`` -> allowed-ID set (catalog minus excluded), or ``None`` (unscoped)."""
         if not failed_asins:
             return None
         excluded = set(failed_asins)

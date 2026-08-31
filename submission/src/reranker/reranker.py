@@ -11,11 +11,7 @@ from state.dialogue_state import budget_bounds
 logger = logging.getLogger(__name__)
 
 RERANKER_CATALOG_LEN = 50000
-
-#: Placeholder -- NOT tuned. Per target-price-scoring-spec.md, tune the
-#: same way the BM25/dense route weights are: grid search against
-#: TechnicalScore on the 200 public dev sessions. Controls how steeply
-#: the multiplier falls off with distance from target_price.
+# NOTE: need to tune & grid search
 DEFAULT_DECAY_RATE = 1.0
 
 
@@ -123,15 +119,7 @@ class Reranker:
         """
         Ranks candidate documents against a query string.
         Candidates is an array of preformatted documents.
-
-        ``target_price``, if given, applies a soft price-closeness
-        adjustment (target-price-scoring-spec.md) to each candidate's
-        cross-encoder score *before* the sort-and-cut below -- so a
-        well-priced candidate can move into ``top_k`` and a poorly-priced
-        one can move out, not just get reordered within an already-fixed
-        top_k. ``None`` (no target stated this turn) is a full no-op:
-        every ``price_multiplier`` call returns 1.0 and scores are
-        unaffected -- this never excludes a candidate, only reorders.
+        Includes soft price-closeness adjustment.
         """
         if not candidates:
             return []
@@ -163,11 +151,6 @@ class Reranker:
     ) -> List[Dict[str, Any]]:
         """
         function for agent: parses state, builds pairs from in-memory catalog, and ranks.
-
-        Pulls ``target_price`` out of ``state`` itself (via
-        ``budget_bounds()``) and factors it into the final score inside
-        ``rank()`` -- callers just pass ``state``, they don't need to
-        extract or pass price info separately.
         """
         query = build_reranker_query(state)
         target_price = budget_bounds(state.get("session_profile", {})).get("target_price")
@@ -180,4 +163,3 @@ class Reranker:
                 candidates.append(item)
 
         return self.rank(query=query, candidates=candidates, top_k=top_k, target_price=target_price)
-

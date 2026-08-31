@@ -1,10 +1,7 @@
 """``parent_asin`` <-> row-index lookup for ``data/catalog.jsonl``.
 
-Neither retrieval route exposes a product's position in the catalog file
-by itself: the BM25 route only returns ``parent_asin`` (the FTS5 table
-doesn't track row order), and the dense route's Chroma store returns
-whatever id it was upserted with. Building this index is a single
-sequential read done once at startup.
+Implemented due to neither retrieval route exposing a product index itself.
+Building this index is a single sequential read done once at startup.
 """
 
 from __future__ import annotations
@@ -17,7 +14,7 @@ __all__ = ["CatalogIndex"]
 
 
 class CatalogIndex:
-    """Ordered ``parent_asin`` list from the catalog, plus the reverse lookup."""
+    """Ordered ``parent_asin`` list from the catalog + reverse lookup."""
 
     def __init__(self, ids: List[str]) -> None:
         self.ids = ids
