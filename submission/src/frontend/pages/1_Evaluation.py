@@ -12,14 +12,18 @@ from utils.ui_helpers import load_evaluation_data, parse_scenario_metrics, parse
 st.set_page_config(page_title="Evaluation Dashboard", page_icon="📊", layout="wide")
 
 st.title("📊 CRIS Evaluation Dashboard")
-st.caption("Dashboard of `results.json` metrics created by `local_evaluator.py` across sessions.")
+st.caption("Dashboard of `results_200.json` metrics created by `local_evaluator.py` across sessions.")
+st.caption("Two results are viewable from this page: `starter_results.json` and `results_200.json`")
 
 # -----------------------------------------------------------------------------
 # Sidebar Config & results.json Loading
 # -----------------------------------------------------------------------------
 st.sidebar.header("📁 Data Source")
-default_path = "results.json"
-results_file_path = st.sidebar.text_input("Path to `results.json` (default `root/`):", value=default_path)
+results_file_path = st.sidebar.selectbox(
+    "Select results file:",
+    options=["results_200.json", "starter_results.json"],
+    index=0,
+)
 
 data, error = load_evaluation_data(results_file_path)
 
