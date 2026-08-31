@@ -1,18 +1,6 @@
-"""Keyword (BM25) retrieval, extracted from ``starter.agent.Agent``.
-
-The starter baseline built its SQLite FTS5 index and BM25 query inline
-inside the ``Agent`` class, which meant nothing else could reuse it. This
-module is that same logic, factored into a standalone route with the same
-``search(query, top_k) -> list[(parent_asin, score)]`` shape the dense
-route (``embed.store.VectorStore``) exposes -- so both can feed
-``retrieval.rrf.reciprocal_rank_fusion`` interchangeably.
-
-Score convention: SQLite's ``bm25()`` returns *lower-is-better* values.
-Every other route in this pipeline (cosine similarity) is
-higher-is-better, and RRF itself only cares about rank order, not raw
-score magnitude -- but to avoid a footgun if raw scores are ever compared
-or logged, :meth:`BM25Index.search` negates the raw value before
-returning it, so "higher score = more relevant" holds everywhere.
+"""Keyword (BM25) retrieval with higher-is-better scores.
+Possesses search(query, top_k) -> list[(parent_asin, score)]``
+to feed into retrieval.rrf.reciprocal_rank_fusion.
 """
 
 from __future__ import annotations
@@ -30,9 +18,8 @@ STOPWORDS = {
     "that", "the", "this", "to", "want", "with", "would", "you", "looking",
 }
 
-#: Column weights for ``bm25(products, ...)``, in table column order
-#: (parent_asin is UNINDEXED so it takes no weight). Unchanged from the
-#: starter agent: title and categories carry the most signal.
+# Column weights for bm25, in table column order
+# title/cat highest weight, parent_asin takes no weight
 _BM25_WEIGHTS = (0.0, 6.0, 4.0, 2.5, 2.5, 1.5, 1.0)
 
 __all__ = ["BM25Index", "TOKEN_RE", "STOPWORDS"]
@@ -57,11 +44,7 @@ def _terms(text: str) -> List[str]:
 
 
 class BM25Index:
-    """In-memory SQLite FTS5 keyword index over the product catalog.
-
-    Same role as ``embed.store.VectorStore`` on the dense side: build once
-    (``__init__``), then call :meth:`search` per turn.
-    """
+    """In-memory SQLite FTS5 keyword index over the product catalog."""
 
     def __init__(self, catalog_path: "str | Path" = "data/catalog.jsonl") -> None:
         self.catalog_path = Path(catalog_path)
@@ -105,22 +88,10 @@ class BM25Index:
         top_k: int,
         candidate_ids: Optional[Set[str]] = None,
     ) -> List[Tuple[str, float]]:
-        """Return up to ``top_k`` ``(parent_asin, score)`` pairs, best first.
-
-        Returns ``[]`` (never raises) when the query has no usable terms
-        after stopword removal -- the same "route has nothing to
-        contribute this turn" contract the dense route follows. Also
-        returns ``[]`` immediately for an empty (but not ``None``)
-        ``candidate_ids`` -- that means some upstream filter (e.g. the
-        coarse-category pre-filter) matched nothing, not "search
-        everything."
-
-        ``candidate_ids``, if given, restricts the search to just those
-        ``parent_asin``s (Task 3's coarse-category hard pre-filter). This
-        goes through a temp table + JOIN rather than an inline
-        ``parent_asin IN (?, ?, ...)`` list, since a category's candidate
-        set can run into the thousands and SQLite caps how many bound
-        parameters a single statement may have.
+        """Return up to top_k (parent_asin, score) pairs, best first.
+        Returns ``[]`` if no usable terms after stopword removal.
+        
+        ``candidate_ids``: restricts search if provided ``parent_asin``s, via JOIN
         """
         unique_terms = list(dict.fromkeys(_terms(query)))[:40]
         if not unique_terms or top_k <= 0:
