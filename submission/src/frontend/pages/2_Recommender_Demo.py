@@ -265,7 +265,7 @@ with col_inspect:
 
         f_col1, f_col2, f_col3, f_col4 = st.columns(4)
         f_col1.metric("Catalog", "50,000")
-        f_col2.metric("Masked Pool", f"{pre_filtered:,}", delta=f"-{dropped_hard:,}", delta_color="blue")
+        f_col2.metric("Masked Pool", f"{pre_filtered:,}", delta=f"-{dropped_hard:,}", delta_color="normal")
         f_col3.metric("RRF Pool", f"{rrf_count}")
         f_col4.metric("Reranker Final", "10")
 
