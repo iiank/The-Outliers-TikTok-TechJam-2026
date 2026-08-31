@@ -21,11 +21,11 @@ DEFAULT_ATTRIBUTE_PRIORITY: List[str] = ["material", "feature", "color", "style"
 HARD FILTERING
 """
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-    
-RERANKER_CATALOG_PATH = ROOT_DIR / "submission" / "src" / "reranker" / "reranker_catalog.jsonl"
+RERANKER_CATALOG_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "reranker"
+    / "reranker_catalog.jsonl"
+)
 
 def is_category_satisfied(
     catalog_category: Optional[Union[List[str], str]],
