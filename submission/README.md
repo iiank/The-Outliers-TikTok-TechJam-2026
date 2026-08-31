@@ -57,17 +57,15 @@ C:.
 ├───evaluator
 │       local_evaluator.py
 │       __init__.py
-│           
-├───scripts
-│       build_chroma_store.py
-│       get_prefs.py
-│       reranker_catalog_parser.py
-│       tune_rrf_weights.py
 │       
 └───submission
     │   agent.py
     │   README.md
     │   requirements.txt
+    │
+    ├───scripts
+    │       build_reranker_catalog.py
+    │
     │   
     └───src
         │   .env
@@ -77,7 +75,6 @@ C:.
         │       shopping_agent.py
         │       __init__.py
         │       
-        │           
         ├───embed
         │       embedder.py
         │       product_text.py
@@ -97,7 +94,6 @@ C:.
         │               
         ├───generation
         │       measure_answerability.py
-        │       tune_preference_tag.py
         │       weighted_entropy.py
         │       __init__.py
         │           
@@ -121,7 +117,6 @@ C:.
                 dialogue_state.py
                 llm_client.py
                 llm_extractor.py
-                README_dialogue_state.md
                 regex_extractor.py
                 __init__.py
 ```
@@ -149,7 +144,7 @@ Verify against the published `SHA256SUMS` file before use.
 **Vector store.** Build the local Chroma index once (and again whenever `data/catalog.jsonl` or the embedding model changes):
 
 ```bash
-python submission/scripts/build_chromadb_store.py
+python -c "from embed.store import build_store; s = build_store('data/catalog.jsonl', variant='title_cat'); print(len(s))"
 ```
 
 This writes `artifacts/chroma/`, which is gitignored — every teammate builds their own copy locally.
@@ -157,20 +152,20 @@ This writes `artifacts/chroma/`, which is gitignored — every teammate builds t
 **Reranker_catalog.** If products are required for evaluation outside of the provided `catalog.jsonl`, please run the following script to create the necessary precomputed reranker_catalog (with the file name changed to the new catalog)
 
 ```bash
-python submission/src/reranker/build_reranker_catalog.py
+python submission/scripts/build_reranker_catalog.py
 ```
 
 **Credentials.** Create `submission/.env` with at least:
 
 ```text
-LLM_API_KEY=GEMINI API KEY
+LLM_API_KEY=GEMINI-API-KEY
 ```
 
 Please obtain a Gemini API Key at "https://ai.google.dev/gemini-api/docs/api-key" > "Create API Key".
 
 ```powershell
 Remove-Item Env:LLM_REASONING_EFFORT -ErrorAction SilentlyContinue
-$env:LLM_API_KEY = "gemini api"
+$env:LLM_API_KEY = "GEMINI-API-KEY"
 $env:LLM_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
 $env:LLM_MODEL = "gemini-3.5-flash-lite"
 $env:LLM_MAX_TOKENS = "512"
