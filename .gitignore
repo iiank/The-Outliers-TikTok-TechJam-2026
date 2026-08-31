@@ -4,7 +4,7 @@ __pycache__/
 .env
 .venv/
 results.json
-data/catalog.jsonl
+# data/catalog.jsonl
 data/releases/
 # Organizer-only code, private evaluation data, manifests, and build reports.
 organizer/
