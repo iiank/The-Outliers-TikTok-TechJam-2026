@@ -124,10 +124,10 @@ class Agent:
 
         message, message_usage = self.message_builder.build(ask_attribute, mode, state, candidates)
         classify_usage = getattr(self.intent_classifier, "last_usage", {}) or {}
-
+        
         return {
             "message": message,
             "ask_attribute": ask_attribute,
             "recommendations": [{"parent_asin": parent_asin} for parent_asin in candidates],
-            "usage": _combined_usage(classify_usage, message_usage),
+            "diagnostics": diagnostics,
         }

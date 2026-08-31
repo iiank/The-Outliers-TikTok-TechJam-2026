@@ -6,9 +6,9 @@ Right Panel: Pipeline State Inspector
 
 import sys
 import uuid
-import pandas as pd
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List
+import pandas as pd
 import streamlit as st
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -18,9 +18,14 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(PROJECT_ROOT / "submission") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "submission"))
 
+from submission.agent import Agent
+
 MAX_TURNS = 10
 MAX_USER_CHARS = 250
-AVAILABLE_PREFERENCE_TAGS = ['fit', 'comfort', 'durability', 'style', 'material', 'weather', 'warmth', 'performance', 'general shopping']
+AVAILABLE_PREFERENCE_TAGS = [
+    'fit', 'comfort', 'durability', 'style', 'material',
+    'weather', 'warmth', 'performance', 'general shopping'
+]
 
 st.set_page_config(
     page_title="Interactive Recommender Demo",
@@ -29,87 +34,13 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-
-# =============================================================================
-# NOTE: [MOCK AGENT - REMOVE WHEN DEPLOYING ACTUAL PIPELINE]
-# The function below generates synthetic turn output to test the frontend UI
-# before wiring up the live agent.
-# =============================================================================
-def generate_mock_turn_output(user_message: str, turn: int, preference_tags: List[str]) -> Dict[str, Any]:
-    """NOTE: Mock pipeline generator for UI verification."""
-    mock_attributes = ["material", "color", "size", "brand", "style", "feature", "budget"]
-    next_attr = mock_attributes[(turn - 1) % len(mock_attributes)]
-
-    mock_items = [
-        {
-            "parent_asin": f"B08SAMPLE{i:02d}",
-            "title": f"Sample Recommended Product {i+1} - Lightweight Comfort Edition",
-            "score": round(0.95 - (i * 0.07), 4),
-            "price": 29.99 + (i * 5),
-            "category": "Clothing, Shoes & Jewelry > Men > Footwear",
-        }
-        for i in range(10)
-    ]
-
-    return {
-        "message": f"I found several matching items based on '{user_message}'. To help narrow this down further, what preference do you have for **{next_attr}**?",
-        "ask_attribute": next_attr,
-        "recommendations": mock_items,
-        "diagnostics": {
-            "dynamic_state": {
-                "session_profile": {
-                    "category": ["footwear"],
-                    "material": ["leather"] if turn > 1 else [],
-                    "color": ["black"] if turn > 2 else [],
-                    "budget": ["<=100"],
-                    "feature": [],
-                    "use_case": [],
-                    "other": [],
-                    "rejected": [],
-                },
-                "user_profile": {
-                    "preference_tags": preference_tags,
-                },
-                "intent": "buying",
-            },
-            "hard_filters_dropped": 4210,
-            "retrieval_counts": {
-                "pre_filtered_pool": 45790,
-                "bm25_top": 50,
-                "dense_top": 50,
-                "rrf_pool": 100,
-            },
-            "top_candidates_ce": [
-                {"asin": item["parent_asin"], "score": item["score"], "title": item["title"]}
-                for item in mock_items[:5]
-            ],
-            "entropy_scores": {
-                "material": 1.42,
-                "color": 1.35,
-                "brand": 1.10,
-                "size": 0.88,
-                "style": 0.65,
-                "budget": 0.40,
-            },
-        },
-    }
-# =============================================================================
-# END NOTE: [MOCK AGENT]
-# =============================================================================
-
-
 # -----------------------------------------------------------------------------
 # Agent Loader & Session Initialization
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Initialising Agent...")
-def load_live_agent():
-    """Attempts to instantiate Shopping Agent."""
-    try:
-        from src.agent.shopping_agent import Agent
-        agent = Agent()
-        return agent, None
-    except Exception as e:
-        return None, str(e)
+def load_live_agent() -> Agent:
+    """Instantiates Shopping Agent."""
+    return Agent()
 
 
 def init_session_state():
@@ -140,6 +71,13 @@ def reset_conversation():
 
 init_session_state()
 
+try:
+    active_agent = load_live_agent()
+    agent_load_error = None
+except Exception as e:
+    active_agent = None
+    agent_load_error = str(e)
+
 # -----------------------------------------------------------------------------
 # Sidebar: Session Controls & Active Tags Indicator
 # -----------------------------------------------------------------------------
@@ -149,24 +87,10 @@ st.sidebar.caption(f"Session ID: `{st.session_state.session_id}`")
 progress_val = min((st.session_state.current_turn - 1) / MAX_TURNS, 1.0)
 st.sidebar.progress(progress_val, text=f"Turn {st.session_state.current_turn} of {MAX_TURNS}")
 
-# NOTE: [MOCK/LIVE TOGGLE] - Toggle can be removed once production agent is default
-agent_mode = st.sidebar.radio(
-    "Agent Backend",
-    ["Mock Agent (Standalone UI Test)", "Live Agent Pipeline"],
-    index=0,
-)
-
-if agent_mode == "Live Agent Pipeline":
-    live_agent, err = load_live_agent()
-    if err:
-        st.sidebar.warning(f"⚠️ Could not load Agent: {err}")
-        st.sidebar.info("Falling back to Mock Agent.")
-        active_agent = None
-    else:
-        st.sidebar.success("✅ Live Agent Loaded")
-        active_agent = live_agent
+if agent_load_error:
+    st.sidebar.error(f"⚠️ Could not load Agent: {agent_load_error}")
 else:
-    active_agent = None
+    st.sidebar.success("✅ Live Agent Loaded")
 
 if st.sidebar.button("Reset Session", use_container_width=True):
     reset_conversation()
@@ -227,14 +151,12 @@ with col_chat:
                         },
                     )
                 except Exception as e:
-                    st.error(f"Failed to reset live agent with profile: {e}")
+                    st.error(f"Failed to reset agent with profile: {e}")
 
             st.rerun()
 
     # Step 2: Active Chat Interface
-    # Only rendered once profile is confirmed
     else:
-        # Display persistent profile banner
         tags_badges = " ".join([f"`{tag}`" for tag in st.session_state.user_preference_tags])
         st.markdown(f"**Customer Preferences:** {tags_badges}")
 
@@ -301,12 +223,14 @@ with col_chat:
             if user_input:
                 clean_input = user_input.strip()
                 if clean_input:
-                    # 1. Record User Turn
-                    st.session_state.messages.append({"role": "user", "content": clean_input})
+                    if active_agent is None:
+                        st.error("Agent is not initialized. Please ensure the agent backend is available.")
+                    else:
+                        # 1. Record User Turn
+                        st.session_state.messages.append({"role": "user", "content": clean_input})
 
-                    # 2. Process Turn through Agent or Mock
-                    with st.spinner("Processing turn through CRIS pipeline..."):
-                        if active_agent is not None:
+                        # 2. Process Turn through Agent
+                        with st.spinner("Processing turn through CRIS pipeline..."):
                             try:
                                 turn_output = active_agent.respond_chat(
                                     session_id=st.session_state.session_id,
@@ -314,32 +238,22 @@ with col_chat:
                                     turn=st.session_state.current_turn,
                                     top_k=10,
                                 )
+                                # 3. Append Assistant Message
+                                assistant_msg = {
+                                    "role": "assistant",
+                                    "content": turn_output.get("message", "Here are my current recommendations:"),
+                                    "ask_attribute": turn_output.get("ask_attribute", ""),
+                                    "recommendations": turn_output.get("recommendations", []),
+                                    "turn": st.session_state.current_turn,
+                                }
+                                st.session_state.messages.append(assistant_msg)
+                                st.session_state.latest_diagnostics = turn_output.get("diagnostics", {})
+
+                                # 4. Increment Turn Counter
+                                st.session_state.current_turn += 1
+                                st.rerun()
                             except Exception as e:
-                                st.error(f"Error calling Agent: {e}")
-                                # NOTE: Fallback to mock on agent failure
-                                turn_output = generate_mock_turn_output(
-                                    clean_input, st.session_state.current_turn, st.session_state.user_preference_tags
-                                )
-                        else:
-                            # NOTE: Default Mock call
-                            turn_output = generate_mock_turn_output(
-                                clean_input, st.session_state.current_turn, st.session_state.user_preference_tags
-                            )
-
-                    # 3. Append Assistant Message
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": turn_output.get("message", "Here are my current recommendations:"),
-                        "ask_attribute": turn_output.get("ask_attribute", ""),
-                        "recommendations": turn_output.get("recommendations", []),
-                        "turn": st.session_state.current_turn,
-                    }
-                    st.session_state.messages.append(assistant_msg)
-                    st.session_state.latest_diagnostics = turn_output.get("diagnostics", {})
-
-                    # 4. Increment Turn Counter
-                    st.session_state.current_turn += 1
-                    st.rerun()
+                                st.error(f"Error executing agent turn: {e}")
         else:
             st.warning("🛑 Maximum turns (10/10) reached for this session. Please reset the session to start again.")
 
@@ -384,7 +298,6 @@ with col_inspect:
 
         st.caption(f"Inferred Intent: `{detected_intent.upper()}`")
 
-        # Extract active non-empty slots
         active_slots = {
             k: v for k, v in session_profile.items()
             if v and k not in ("rejected",)
@@ -430,9 +343,9 @@ with col_inspect:
         st.markdown("---")
 
         # ---------------------------------------------------------------------
-        # 4. Top 10 Cross-Encoder Candidate Rankings
+        # 4. Top 5 Cross-Encoder Candidate Rankings
         # ---------------------------------------------------------------------
-        st.markdown("**4. Reranker (Cross-Encoder) Top 10 Scoring**")
+        st.markdown("**4. Reranker (Cross-Encoder) Top 5 Scoring**")
         ce_candidates = diagnostics.get("top_candidates_ce", [])
 
         if ce_candidates:
@@ -444,7 +357,7 @@ with col_inspect:
                         "Score": item.get("score", 0.0),
                         "Title": item.get("title", f"Product {item.get('parent_asin')}"),
                     }
-                    for idx, item in enumerate(ce_candidates[:10])
+                    for idx, item in enumerate(ce_candidates[:5])
                 ]
             )
 
