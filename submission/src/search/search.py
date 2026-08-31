@@ -134,7 +134,10 @@ class SearchPipeline:
         if catalog is not None:
             self.catalog: List[Dict[str, Any]] = catalog
         else:
-            _by_asin = {row["parent_asin"]: row for row in load_reranker_catalog()}
+            _by_asin = {
+                row["parent_asin"]: row
+                for row in load_reranker_catalog("submission/src/reranker/reranker_catalog.jsonl")
+            }
             self.catalog = [_by_asin[asin] for asin in self.catalog_index.ids]
 
         if retriever is None:
@@ -240,7 +243,7 @@ class SearchPipeline:
                 needs_heuristic_fallback = True
             diagnostics["entropy_scores"] = {str(ls[0]): float(ls[2]) for ls in scored}
         except Exception as e:
-            logger.warning(f"WeightedEntropy generation failed: {e}. Falling back to heuristic.")
+            logger.warning(f"WeightedEntropy generation failed: {e}. Falling back to heuristic.", exc_info=True)
             needs_heuristic_fallback = True
 
         if selected_attribute is None and needs_heuristic_fallback:
