@@ -103,13 +103,6 @@ IDEAL_VALUE_COUNT = 12.0
 FEATURE_SCORE = 0.30
 MIN_SCORE = 0.0
 _REFUSAL_DECAY = 0.55
-
-#: Consecutive refusals before an attribute is fully excluded rather than
-#: merely decayed. ``AskState.penalty()`` alone only shrinks a score toward
-#: zero and never reaches it (``MIN_SCORE`` defaults to ``0.0``), so without
-#: this cutoff a chronically-ignored attribute keeps being offered forever,
-#: just at a lower score. Placeholder value pending eval-driven tuning, same
-#: status as the untuned RRF weights in retrieval/rrf.py.
 HARD_REFUSAL_LIMIT = 2
 
 
@@ -226,12 +219,6 @@ class AskState:
         return _REFUSAL_DECAY ** self.refusals.get(attribute, 0)
 
 
-#: Attributes that can be declined/fatigued out of asking, beyond the
-#: table-backed ``ASKABLE_ATTRIBUTES``. ``feature`` has its own bespoke
-#: scoring path in ``rank_attributes`` (no fixed vocab table -- open text),
-#: but that path still gates on ``state.banned``, so it must be trackable
-#: here too or a declined/fatigued ``feature`` can never actually stop being
-#: asked about (it would keep re-scoring at its fixed baseline forever).
 _TRACKABLE_ATTRIBUTES = set(ASKABLE_ATTRIBUTES) | {"feature"}
 
 
@@ -492,11 +479,13 @@ class WeightedEntropy:
             strength=self.strength,
             include_blocked=include_blocked,
         )
+        if not include_blocked:
+            ranked = [item for item in ranked if np.isfinite(item.score)]
         return [
             [
                 item.attribute,
                 round(item.entropy, 4),
-                None if item.score == float("-inf") else round(item.score, 4),
+                None if not np.isfinite(item.score) else round(item.score, 4),
             ]
             for item in ranked
         ]
