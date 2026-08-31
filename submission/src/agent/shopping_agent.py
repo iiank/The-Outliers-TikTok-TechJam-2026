@@ -35,6 +35,7 @@ class StateTracker(Protocol):
     def get_state(self, session_id: str) -> DialogueState: ...
     def update(self, user_message: str, current_state: DialogueState, turn: Optional[int] = None) -> DialogueState: ...
     def record_recommendations(self, state: DialogueState, parent_asins: List[str]) -> DialogueState: ...
+    def record_ask(self, state: DialogueState, ask_attribute: Optional[str]) -> DialogueState: ...
 
 
 def _combined_usage(*parts: Dict[str, int]) -> Dict[str, int]:
@@ -66,6 +67,7 @@ class Agent:
         candidates, ask_attribute, _diagnostics = search(state, user_message)
         candidates = candidates[:top_k]
         self.state_tracker.record_recommendations(state, candidates)
+        self.state_tracker.record_ask(state, ask_attribute)
 
         message, message_usage = self.message_builder.build(ask_attribute, mode, state, candidates)
         extractor_usage = drain_usage()
