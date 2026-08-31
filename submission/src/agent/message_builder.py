@@ -7,9 +7,9 @@ default path calls an LLM to phrase it naturally from ``ask_attribute``,
 ``mode``, and the session state.
 
 ``TemplateMessageBuilder`` is a complete, tested, offline alternative --
-swap it in with ``Agent(message_builder=TemplateMessageBuilder())``. As with
-the intent classifier, there's no automatic fallback: an ``LLMMessageBuilder``
-API failure raises, same as any other ``respond()`` exception.
+swap it in with ``Agent(message_builder=TemplateMessageBuilder())``. There's
+no automatic fallback: an ``LLMMessageBuilder`` API failure raises, same as
+any other ``respond()`` exception.
 
 CROSS-BOUNDARY POINTS IN THIS FILE:
 
@@ -17,8 +17,7 @@ CROSS-BOUNDARY POINTS IN THIS FILE:
   ``LLMMessageBuilder.build()``, the ``state.session_profile`` read: reads
   data owned by the state teammate's ``DialogueState`` class.
 * ``BOUNDARY(external: Anthropic API)`` -- ``LLMMessageBuilder`` calls out to
-  the Anthropic Messages API over the network. Same network/cost visibility
-  note as ``intent_classifier.py``.
+  the Anthropic Messages API over the network.
 * Deliberately NOT a boundary: ``candidates`` (the ``parent_asin`` list from
   ``Searcher.search()``) is treated as opaque IDs here -- this module never
   looks up catalog/product data for them. See the note on ``LLMMessageBuilder``
