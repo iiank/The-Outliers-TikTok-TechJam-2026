@@ -343,9 +343,9 @@ with col_inspect:
         st.markdown("---")
 
         # ---------------------------------------------------------------------
-        # 4. Top 10 Cross-Encoder Candidate Rankings
+        # 4. Top 5 Cross-Encoder Candidate Rankings
         # ---------------------------------------------------------------------
-        st.markdown("**4. Reranker (Cross-Encoder) Top 10 Scoring**")
+        st.markdown("**4. Reranker (Cross-Encoder) Top 5 Scoring**")
         ce_candidates = diagnostics.get("top_candidates_ce", [])
 
         if ce_candidates:
@@ -357,7 +357,7 @@ with col_inspect:
                         "Score": item.get("score", 0.0),
                         "Title": item.get("title", f"Product {item.get('parent_asin')}"),
                     }
-                    for idx, item in enumerate(ce_candidates[:10])
+                    for idx, item in enumerate(ce_candidates[:5])
                 ]
             )
 

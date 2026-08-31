@@ -4,6 +4,7 @@ import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import torch
 from sentence_transformers import CrossEncoder
+from pathlib import Path
 
 from state.dialogue_state import budget_bounds
 
@@ -23,17 +24,10 @@ def price_multiplier(
     target_price: Optional[float],
     decay_rate: float = DEFAULT_DECAY_RATE,
 ) -> float:
-    """Multiplicative exponential-decay factor for how close ``price`` is to ``target_price``.
-
-    ``exp(-|price - target_price| / (target_price * decay_rate))`` -- 1.0
-    exactly at target, decaying symmetrically as price moves away in
-    either direction (over- and under-target penalized equally --
-    deliberate, per target-price-scoring-spec.md Open Decision 2).
-
-    Neutral (``1.0``) whenever ``price`` or ``target_price`` is missing --
-    never defaults missing price to ``0`` or a large sentinel, since
-    either would smuggle a hard exclusion into a formula that must never
-    exclude a candidate (target_price is a soft signal only).
+    """
+    Multiplicative exponential-decay factor for how close 'price' is to 'target_price'.
+    exp(-|price - target_price| / (target_price * decay_rate))
+    Assume 1.0 if price is not defined
     """
     if price is None or target_price is None:
         return 1.0
@@ -80,10 +74,12 @@ def build_reranker_query(state: Dict[str, Any]) -> str:
     query_str = " ".join(query_parts).strip()
     return query_str if query_str else "general merchandise"
 
-def load_reranker_catalog(catalog_path: str = "reranker_catalog.jsonl") -> List[Dict[str, Any]]:
+def load_reranker_catalog(catalog_path: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Loads the complete reranker_catalog into memory once during agent startup.
     """
+    if catalog_path is None:
+        catalog_path = str(Path(__file__).resolve().parent / "reranker_catalog.jsonl")
     catalog = []
     with open(catalog_path, "r", encoding="utf-8") as f:
         for line in f:
