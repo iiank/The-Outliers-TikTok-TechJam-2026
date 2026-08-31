@@ -11,11 +11,6 @@ _stale_agent = sys.modules.get("agent")
 if _stale_agent is not None and not hasattr(_stale_agent, "__path__"):
     del sys.modules["agent"]
 
-from agent.intent_classifier import (
-    IntentClassifier,
-    LLMIntentClassifier,
-    RegexIntentClassifier,
-)
 from agent.message_builder import (
     LLMMessageBuilder,
     MessageBuilder,
