@@ -102,7 +102,7 @@ def build_store(
     catalog_path: str | Path,
     persist_directory: str | Path = "artifacts/chroma",
     embedder: Embedder | None = None,
-    variant: str = "default",
+    variant: str = "title_cat",
     collection_name: str = DEFAULT_COLLECTION,
     batch_size: int = 512,
     limit: int | None = None,
