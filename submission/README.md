@@ -162,6 +162,8 @@ python submission/scripts/build_reranker_catalog.py
 LLM_API_KEY=GEMINI-API-KEY
 ```
 
+Please obtain a Gemini API Key at "https://ai.google.dev/gemini-api/docs/api-key" > "Create API Key".
+
 ```powershell
 Remove-Item Env:LLM_REASONING_EFFORT -ErrorAction SilentlyContinue
 $env:LLM_API_KEY = "GEMINI-API-KEY"
@@ -183,11 +185,14 @@ python -m evaluator.local_evaluator --output results_200.json
 
 This writes per-session results and aggregate metrics (Hit Rate@10, MRR, MTTC, Efficiency, TechnicalScore — overall and per scenario) to `results.json`. It currently points at `submission/agent.py` (see the note at the top of `evaluator/local_evaluator.py`); the weak BM25 baseline in `starter/agent.py` scores Hit Rate@10 `0.125`, MRR `0.068034`, MTTC `9.81` for comparison (`docs/baseline_results.json`).
 
-Run the interactive demo:
+To run the interactive demo on localhost:
 
 ```bash
 streamlit run submission/src/frontend/app.py
 ```
+
+The results displayed on the Evaluation Dashboard page can be changed by renaming the desired json to "results_200.json", and
+selecting that filename in the sidebar.
 
 ## Data
 

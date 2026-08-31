@@ -4,7 +4,6 @@
 
 **Team Name:** The Outliers  
 **Problem Statement 4:** Shopping Copilot  
-**Deployment:** [CRIS Live Demo](https://f7omkxpgn4oarytaul29be.streamlit.app/)
 
 ---
 
