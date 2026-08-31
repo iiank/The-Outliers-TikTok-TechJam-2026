@@ -11,14 +11,19 @@ _stale_agent = sys.modules.get("agent")
 if _stale_agent is not None and not hasattr(_stale_agent, "__path__"):
     del sys.modules["agent"]
 
-from agent.message_builder import (  # noqa: E402
+from agent.intent_classifier import (
+    IntentClassifier,
+    LLMIntentClassifier,
+    RegexIntentClassifier,
+)
+from agent.message_builder import (
     LLMMessageBuilder,
     MessageBuilder,
     TemplateMessageBuilder,
 )
-from agent.shopping_agent import Agent as _ShoppingAgent  # noqa: E402
-from state.dialogue_state import DialogueStateTracker  # noqa: E402
-from state.regex_extractor import extract_slots  # noqa: E402
+from agent.shopping_agent import Agent as _ShoppingAgent
+from state.dialogue_state import DialogueStateTracker
+from state.regex_extractor import extract_slots
 
 __all__ = ["Agent"]
 

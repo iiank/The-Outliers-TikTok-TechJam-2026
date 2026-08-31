@@ -57,7 +57,7 @@ with col_scenario:
         # Display Table
         st.dataframe(
             df_scenarios,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "Scenario Type": st.column_config.TextColumn("Scenario Type"),
@@ -117,7 +117,7 @@ if raw_sessions:
 
     st.dataframe(
         filtered_df,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "sample_id": st.column_config.TextColumn("Sample ID"),
