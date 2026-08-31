@@ -79,7 +79,7 @@ class Agent:
         state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model; also sets state.intent
         mode = state.intent or "browsing"  # BOUNDARY(state): joint intent+slot extraction, not a separate classifier call
 
-        candidates, ask_attribute, _diagnostics = search(state)
+        candidates, ask_attribute, _diagnostics = search(state, user_message)
         candidates = candidates[:top_k]
         self.state_tracker.record_recommendations(state, candidates)  # BOUNDARY(state)
 
@@ -126,7 +126,7 @@ class Agent:
         state = self.state_tracker.update(user_message, prior_state, turn)  # BOUNDARY(state): folds this turn's message into their state model; also sets state.intent
         mode = state.intent or "browsing"  # BOUNDARY(state): joint intent+slot extraction, not a separate classifier call
 
-        candidates, ask_attribute, diagnostics = search(state)
+        candidates, ask_attribute, diagnostics = search(state, user_message)
         candidates = candidates[:top_k]
         self.state_tracker.record_recommendations(state, candidates)  # BOUNDARY(state)
 

@@ -196,6 +196,21 @@ def no_preference_attributes(session_profile: Mapping[str, Any]) -> List[str]:
         if str(value).startswith(prefix)
     ]
 
+# iian
+_NO_PREFERENCE_RE = re.compile(
+    r"^\s*i don.t have (?:a|an additional) preference for ([a-z_]+)\b", re.I
+)
+_NO_SIGNAL_RE = re.compile(r"^\s*those options are not quite right yet\b", re.I)
+
+def simulator_shortcut(message: str) -> Optional[Dict[str, Any]]:
+    text = message or ""
+    found = _NO_PREFERENCE_RE.match(text)
+    if found:
+        attribute = found.group(1).lower()
+        return {"no_preference": [attribute]} if attribute in ASK_ATTRIBUTES else {}
+    if _NO_SIGNAL_RE.match(text):
+        return {}
+    return None
 
 #: key holds a bare string, not a list.
 SlotExtractor = Callable[[str, DialogueState], Dict[str, Any]]
@@ -362,8 +377,15 @@ class DialogueStateTracker:
         # revision count in _update_history.
         revised_attributes: set = set()
         message = user_message or ""
+        shortcut = simulator_shortcut(message)
 
-        extracted = dict(self.extractor(message, current_state) or {})
+        if shortcut is None:
+            extracted = dict(self.extractor(message, current_state) or {})
+        else:
+            extracted = dict(shortcut)
+
+        # iian
+        # extracted = dict(self.extractor(message, current_state) or {})
 
         # Intent is not a slot: not sticky, so a failed/empty turn means
         # "unknown this turn", not "still whatever it was last turn".
