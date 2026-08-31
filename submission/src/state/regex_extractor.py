@@ -11,13 +11,6 @@ this pass matched nothing, or when a single-value slot (``category``,
 ``budget``, ``size`` -- see ``dialogue_state.SINGLE_VALUE_SLOTS``) matched more
 than one distinct value and needs a real read of the sentence to disambiguate.
 Everything else is resolved here for roughly zero cost.
-
-The buy/browse heuristic below duplicates ``agent.intent_classifier
-.RegexIntentClassifier`` (same signal words, different label spelling --
-``"buying"``/``"browsing"`` here vs. that module's ``"buy"``/``"browse"``).
-Not merged on purpose: ``state`` is the lower layer (``agent`` already imports
-from it for typing), so importing ``agent`` from here would invert that
-dependency. Keep the two heuristics in sync by hand if one changes.
 """
 
 from __future__ import annotations

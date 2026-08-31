@@ -3,17 +3,23 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from agent.intent_classifier import LLMIntentClassifier, RegexIntentClassifier
 from agent.message_builder import LLMMessageBuilder, TemplateMessageBuilder
 from agent.shopping_agent import Agent
 from state.dialogue_state import DialogueState, DialogueStateTracker, empty_session_profile
 
 
 class FakeStateTracker:
-    """Minimal StateTracker double: no slot extraction, just turn bookkeeping."""
+    """Minimal StateTracker double: no slot extraction, just turn bookkeeping.
 
-    def __init__(self) -> None:
+    ``default_intent`` lets a test control what ``update()`` sets
+    ``state.intent`` to -- standing in for the real joint intent+slot
+    extractor, so tests can confirm ``Agent`` reads mode off state rather
+    than calling a separate classifier.
+    """
+
+    def __init__(self, default_intent: str | None = None) -> None:
         self._states: dict[str, DialogueState] = {}
+        self.default_intent = default_intent
 
     def reset(self, session_id: str, user_profile: dict | None = None) -> DialogueState:
         state = DialogueState(session_id=session_id, user_profile=dict(user_profile or {}))
@@ -26,6 +32,7 @@ class FakeStateTracker:
     def update(self, user_message: str, current_state: DialogueState, turn: int | None = None) -> DialogueState:
         state = current_state.copy()
         state.turn = turn if turn is not None else current_state.turn + 1
+        state.intent = self.default_intent
         self._states[state.session_id] = state
         return state
 
@@ -52,19 +59,12 @@ class FakeSearcher:
         return self.candidates, self.ask_attribute, {}
 
 
-class FakeIntentClassifier:
-    def __init__(self, mode: str = "buy") -> None:
-        self.mode = mode
-        self.last_usage: dict[str, int] = {}
-        self.calls: list[tuple[str, DialogueState]] = []
-
-    def classify(self, user_message: str, state: DialogueState) -> str:
-        self.calls.append((user_message, state))
-        return self.mode
-
-
 class FakeMessageBuilder:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
     def build(self, ask_attribute, mode, state, candidates):
+        self.calls.append((ask_attribute, mode, state, candidates))
         return f"asking about {ask_attribute}" if ask_attribute else "presenting results", {}
 
 
@@ -75,7 +75,6 @@ class AgentWiringTests(unittest.TestCase):
         searcher = FakeSearcher(candidates if candidates is not None else ["A", "B", "C"], ask_attribute)
         agent = Agent.__new__(Agent)  # bypass __init__
         agent.state_tracker = FakeStateTracker()
-        agent.intent_classifier = FakeIntentClassifier("buy")
         agent.message_builder = FakeMessageBuilder()
         return agent, searcher
 
@@ -105,61 +104,31 @@ class AgentWiringTests(unittest.TestCase):
         self.assertIsNone(response["ask_attribute"])
         self.assertEqual(response["message"], "presenting results")
 
-    def test_intent_classification_runs_before_search_and_state_update(self) -> None:
+    def test_mode_comes_from_state_intent_not_a_separate_classifier(self) -> None:
+        # No intent_classifier exists on Agent anymore -- mode for the message
+        # builder is read straight off state.intent, which the (real) joint
+        # intent+slot extractor sets as part of state_tracker.update().
         agent, searcher = self._agent()
+        agent.state_tracker = FakeStateTracker(default_intent="buying")
         agent.reset("s1", {})
         with patch("agent.shopping_agent.search", side_effect=searcher.search):
             agent.respond("s1", "I need a size 10 boot", turn=1, top_k=10)
-        # classify() saw the pre-update state (turn 0, from reset), proving it
-        # ran on the prior state, not the state produced by this turn's update.
-        classify_calls = agent.intent_classifier.calls
-        self.assertEqual(len(classify_calls), 1)
-        _, state_seen = classify_calls[0]
-        self.assertEqual(state_seen.turn, 0)
-        # search() ran against the *updated* state (turn 1). It takes no mode
-        # argument -- SearchPipeline reads intent mode off state.intent itself.
+        self.assertEqual(len(agent.message_builder.calls), 1)
+        _, mode_seen, state_seen, _ = agent.message_builder.calls[0]
+        self.assertEqual(mode_seen, "buying")
+        # search() ran against the *updated* state (turn 1), same state.intent
+        # SearchPipeline itself reads for RRF weighting.
         self.assertEqual(len(searcher.calls), 1)
         self.assertEqual(searcher.calls[0].turn, 1)
+        self.assertEqual(searcher.calls[0].intent, "buying")
 
-
-class RegexIntentClassifierTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.classifier = RegexIntentClassifier()
-        self.empty_state = DialogueState(session_profile=empty_session_profile())
-
-    def test_concrete_requirement_reads_as_buy(self) -> None:
-        message = "I need a waterproof size 10 hiking boot under $80."
-        self.assertEqual(self.classifier.classify(message, self.empty_state), "buy")
-
-    def test_vague_opening_reads_as_browse(self) -> None:
-        message = "Just looking around, not sure what I want yet."
-        self.assertEqual(self.classifier.classify(message, self.empty_state), "browse")
-
-    def test_ambiguous_message_falls_back_to_known_constraints(self) -> None:
-        filled_state = DialogueState(session_profile={**empty_session_profile(), "category": ["boots"]})
-        self.assertEqual(self.classifier.classify("hmm okay", filled_state), "buy")
-        self.assertEqual(self.classifier.classify("hmm okay", self.empty_state), "browse")
-
-    def test_multi_digit_size_reads_as_buy(self) -> None:
-        # Regression: \d without + only matched a single digit, so "size 10"
-        # (and any two-digit size) silently failed to register as "buy".
-        self.assertEqual(self.classifier.classify("size 10 boots please", self.empty_state), "buy")
-
-    def test_bare_dollar_amount_reads_as_buy(self) -> None:
-        # Regression: \b immediately before "$" never holds in real text (a
-        # space or string-start precedes it, not a word character), so a
-        # bare "$80" -- without a leading "under" -- silently failed to match.
-        self.assertEqual(self.classifier.classify("$80 budget", self.empty_state), "buy")
-        self.assertEqual(self.classifier.classify("$8 budget", self.empty_state), "buy")
-
-    def test_requires_reads_as_buy(self) -> None:
-        # Regression: required? only matched "require"/"required", not "requires".
-        self.assertEqual(self.classifier.classify("It requires waterproofing", self.empty_state), "buy")
-
-    def test_maybe_no_longer_defeats_a_clear_buy_signal(self) -> None:
-        # Regression: "maybe" in _BROWSE_RE fired alongside "i need" in
-        # _BUY_RE, turning a clear buy message into a tie.
-        self.assertEqual(self.classifier.classify("Maybe I need a size 10 boot", self.empty_state), "buy")
+    def test_mode_defaults_to_browsing_when_state_intent_is_unset(self) -> None:
+        agent, searcher = self._agent()  # FakeStateTracker() default_intent=None
+        agent.reset("s1", {})
+        with patch("agent.shopping_agent.search", side_effect=searcher.search):
+            agent.respond("s1", "hello", turn=1, top_k=10)
+        _, mode_seen, _, _ = agent.message_builder.calls[0]
+        self.assertEqual(mode_seen, "browsing")
 
 
 class _FakeUsage:
@@ -202,17 +171,8 @@ class KnownContextExcludesRejectedTests(unittest.TestCase):
     """Regression: the "known so far" summary sent to the LLM used to
     include the "rejected" slot verbatim, presenting declined values (and
     raw "no_preference:<attr>" marker strings) as if they were confirmed
-    preferences. Both LLM-backed pieces build this string; neither call
-    touches the network here (a fake client records what would be sent)."""
-
-    def test_intent_classifier_excludes_rejected(self) -> None:
-        client = _FakeAnthropicClient(reply_text="buy")
-        classifier = LLMIntentClassifier(client=client)
-        classifier.classify("anything", _rejected_state())
-        sent = client.messages.last_kwargs["messages"][0]["content"]
-        self.assertIn("color", sent)
-        self.assertNotIn("rejected", sent)
-        self.assertNotIn("no_preference", sent)
+    preferences. This call never touches the network here (a fake client
+    records what would be sent)."""
 
     def test_message_builder_excludes_rejected(self) -> None:
         client = _FakeAnthropicClient(reply_text="Do you have a color preference?")
@@ -243,10 +203,7 @@ class AgentOfflineSwapTests(unittest.TestCase):
     no network dependency."""
 
     def test_offline_swap_runs_end_to_end(self) -> None:
-        agent = Agent(
-            intent_classifier=RegexIntentClassifier(),
-            message_builder=TemplateMessageBuilder(),
-        )
+        agent = Agent(message_builder=TemplateMessageBuilder())
         self.assertIsInstance(agent.state_tracker, DialogueStateTracker)
         agent.reset("s1", {"summary": "test"})
         searcher = FakeSearcher(["A", "B"], "material")
