@@ -144,6 +144,7 @@ Verify against the published `SHA256SUMS` file before use.
 **Vector store.** Build the local Chroma index once (and again whenever `data/catalog.jsonl` or the embedding model changes):
 
 ```bash
+$env:PYTHONPATH = "submission/src"
 python -c "from embed.store import build_store; s = build_store('data/catalog.jsonl', variant='title_cat'); print(len(s))"
 ```
 
