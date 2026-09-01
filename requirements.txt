@@ -3,7 +3,7 @@ numpy>=1.26
 
 # Dense retrieval (embed/) and reranker (reranker/)
 sentence-transformers>=3.0
-torch>=2.13.0
+torch>=2.0
 torchvision>=0.26.0
 
 # Dense vector store (embed/store.py)
